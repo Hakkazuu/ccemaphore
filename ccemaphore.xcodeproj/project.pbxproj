@@ -17,6 +17,7 @@
 		A100000000000000000000F2 /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F1 /* Localization.swift */; };
 		A100000000000000000000F4 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F3 /* Localizable.xcstrings */; };
 		A100000000000000000000FD /* ccemaphore_notification.aiff in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000FC /* ccemaphore_notification.aiff */; };
+		A1000000000000000000AA1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000AA0 /* Assets.xcassets */; };
 		A100000000000000000000F7 /* AppPresence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* AppPresence.swift */; };
 		A100000000000000000000FF /* ProcTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000FE /* ProcTree.swift */; };
 		A100000000000000000000F9 /* Log.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F8 /* Log.swift */; };
@@ -53,6 +54,7 @@
 		A100000000000000000000F1 /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
 		A100000000000000000000F3 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Resources/Localizable.xcstrings; sourceTree = SOURCE_ROOT; };
 		A100000000000000000000FC /* ccemaphore_notification.aiff */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/ccemaphore_notification.aiff; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000AA0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Resources/Assets.xcassets; sourceTree = SOURCE_ROOT; };
 		A100000000000000000000F6 /* AppPresence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPresence.swift; sourceTree = "<group>"; };
 		A100000000000000000000FE /* ProcTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcTree.swift; sourceTree = "<group>"; };
 		A100000000000000000000F8 /* Log.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Log.swift; sourceTree = "<group>"; };
@@ -94,6 +96,7 @@
 				2A3EF6A91B065EE8D9DEAF07 /* Sources */,
 				A100000000000000000000F3 /* Localizable.xcstrings */,
 				A100000000000000000000FC /* ccemaphore_notification.aiff */,
+				A1000000000000000000AA0 /* Assets.xcassets */,
 				284A3B8D286C46267D6492C0 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -250,6 +253,7 @@
 			files = (
 				A100000000000000000000F4 /* Localizable.xcstrings in Resources */,
 				A100000000000000000000FD /* ccemaphore_notification.aiff in Resources */,
+				A1000000000000000000AA1 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

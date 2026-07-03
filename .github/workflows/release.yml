@@ -1,0 +1,137 @@
+# Build, sign, notarize and publish a ccemaphore DMG on every `v*` tag.
+#
+# Setup, required secrets, and the security model are documented in docs/RELEASING.md.
+# Cut a release:  git tag v1.0.0 && git push origin v1.0.0
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # needed to create the GitHub Release and upload the DMG
+
+jobs:
+  release:
+    # ccemaphore needs Xcode 26 — use a runner image that ships it (macos-26 does;
+    # bump this if GitHub renames the image). The step below picks the newest Xcode present.
+    runs-on: macos-26
+    # Bind the signing secrets to a protected Environment. Configure it under
+    # Settings ▸ Environments ▸ "release" with "Required reviewers" so every signed
+    # build pauses for your manual approval before the secrets are exposed — even a
+    # tag push can't sign without you clicking Approve. See docs/RELEASING.md.
+    environment: release
+    env:
+      SCHEME: ccemaphore
+      APP_NAME: ccemaphore
+      PRODUCT: ccemaphore.app
+    steps:
+      # Third-party actions are pinned to a full commit SHA (not a moving tag) so a
+      # compromised tag can't inject code into this secret-bearing run. Comments note
+      # the human-readable version; bump both together via `gh api .../git/ref/tags/<v>`.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Select the newest installed Xcode
+        run: |
+          set -euo pipefail
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          echo "Selecting $XC"
+          sudo xcode-select -switch "$XC"
+          xcodebuild -version
+
+      - name: Derive version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Import Developer ID signing certificate
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+
+          echo "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Prepend our keychain to the search list so codesign/xcodebuild find the identity.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+
+          # Resolve the exact identity name (e.g. "Developer ID Application: Name (TEAMID)").
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Using identity: $IDENTITY"
+
+      - name: Build Release (unsigned)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ccemaphore.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          cp -R "$RUNNER_TEMP/dd/Build/Products/Release/$PRODUCT" "$RUNNER_TEMP/$PRODUCT"
+
+      - name: Codesign (Developer ID, Hardened Runtime)
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/$PRODUCT"
+          # Sign nested code first (frameworks/helpers), then the app bundle, deep + hardened runtime.
+          codesign --force --deep --options runtime --timestamp \
+            --sign "$SIGN_IDENTITY" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Build DMG
+        id: dmg
+        run: |
+          set -euo pipefail
+          DMG="$RUNNER_TEMP/${APP_NAME}-${{ steps.ver.outputs.version }}.dmg"
+          # Plain hdiutil (no AppleScript window styling) — rock-solid on headless CI.
+          # Stage the .app plus an /Applications symlink so users drag-to-install.
+          STAGE="$RUNNER_TEMP/dmg-src"
+          rm -rf "$STAGE"; mkdir -p "$STAGE"
+          cp -R "$RUNNER_TEMP/$PRODUCT" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create \
+            -volname "$APP_NAME" \
+            -srcfolder "$STAGE" \
+            -fs HFS+ \
+            -format UDZO \
+            -ov \
+            "$DMG"
+          # Sign the DMG itself so its origin is verifiable before mounting.
+          codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG"
+          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Notarize & staple
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          DMG="${{ steps.dmg.outputs.path }}"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --password "$NOTARY_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: ${{ steps.dmg.outputs.path }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true

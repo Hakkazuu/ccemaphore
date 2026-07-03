@@ -31,6 +31,21 @@ playground.xcworkspace
 
 .build/
 
+# Xcode build output
+DerivedData/
+
+# ccemaphore: assembled .app bundle output (Scripts/package_app.sh)
+/build/
+.swiftpm/
+.DS_Store
+
+# ccemaphore: internal design notes / dev scratch (plans, fix logs, mockups) — kept
+# local, not shipped. Public docs (e.g. docs/RELEASING.md) live directly under docs/.
+/docs/internal/
+
+# Raw screen recordings — the optimized GIF (docs/media/demo.gif) is what ships.
+*.mov
+
 # CocoaPods
 #
 # We recommend against adding the Pods directory to your .gitignore. However
@@ -60,3 +75,4 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+.claude/settings.local.json

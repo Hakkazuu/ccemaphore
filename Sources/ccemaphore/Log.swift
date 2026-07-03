@@ -251,6 +251,16 @@ enum LogExport {
         }
     }
 
+    /// "Show logs in Finder" — reveal the log directory so the user can grab today's `.log` file
+    /// directly (or just confirm where logs live). Creates the folder first so reveal never no-ops on a
+    /// fresh install that hasn't written a line yet.
+    @MainActor
+    static func revealInFinder() {
+        try? FileManager.default.createDirectory(at: LogCore.directory, withIntermediateDirectories: true)
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: LogCore.directory.path)
+        Log.app.info("reveal logs dir \(LogCore.directory.path)")
+    }
+
     /// Zip the directory via `NSFileCoordinator(.forUploading)` — coordinating a directory read with
     /// that option produces a temporary `.zip`, so we avoid spawning `/usr/bin/zip`. Copy it to `dest`.
     @discardableResult

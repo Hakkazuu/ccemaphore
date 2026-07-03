@@ -234,9 +234,35 @@ struct FloatingPanelView: View {
             )
 
             trustedSection
+
+            diagnosticsSection
         }
         .padding(.bottom, 10)
         // Quit is intentionally NOT here — it lives in the menu-bar item (see `CcemaphoreApp`).
+    }
+
+    // MARK: Diagnostics (log export)
+
+    /// The "Диагностика" section: quick access to the on-disk logs so the user can share them for
+    /// debugging. "Сохранить логи…" zips `~/Library/Logs/ccemaphore` via an NSSavePanel; "Показать в
+    /// Finder" reveals the folder. (This save action existed in the old menu-bar build and was lost in
+    /// the floating-panel rebuild — `LogExport` was still complete, just no longer wired to any UI.)
+    private var diagnosticsSection: some View {
+        VStack(spacing: 0) {
+            SettingsSectionHeader(label: L("settings.section.diagnostics"))
+            SettingsAppRow(
+                label: L("settings.saveLogs"),
+                subtitle: L("settings.saveLogs.subtitle"),
+                glyph: "↗",
+                action: { LogExport.presentSavePanel() }
+            )
+            SettingsAppRow(
+                label: L("settings.revealLogs"),
+                subtitle: L("settings.revealLogs.subtitle"),
+                glyph: "↗",
+                action: { LogExport.revealInFinder() }
+            )
+        }
     }
 
     // MARK: Trusted commands (auto-allow list)
@@ -645,6 +671,20 @@ extension SettingsAppRow where Trailing == AnyView {
             Text(on ? L("state.on") : L("state.off"))
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(on ? DS.green : DS.textTertiary)
+        )
+    }
+
+    /// Row that performs a one-shot action on tap (e.g. "Save logs…"), showing a trailing glyph rather
+    /// than an on/off state — the whole row is the tap target.
+    init(label: String, subtitle: String? = nil, glyph: String, enabled: Bool = true, action: @escaping () -> Void) {
+        self.label = label
+        self.subtitle = subtitle
+        self.enabled = enabled
+        self.action = action
+        self.trailing = AnyView(
+            Text(glyph)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DS.textSecondary)
         )
     }
 }

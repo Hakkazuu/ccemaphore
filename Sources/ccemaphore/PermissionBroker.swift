@@ -432,9 +432,15 @@ enum PermissionBroker {
                   let content = msg["content"] as? [[String: Any]] else { continue }
             for block in content.reversed() where (block["type"] as? String) == "tool_use" {
                 guard (block["name"] as? String) == tool, let id = block["id"] as? String else { continue }
-                // If both sides expose an identifier, they must match; if we can't compute one, fall back
-                // to the newest same-named block (best effort — nil just disables early detection).
-                if let wantSig, let bsig = inputSignature(block["input"]), bsig != wantSig { continue }
+                // Both sides must expose a matching identifier. A tool whose input has none of the known
+                // keys (e.g. WebSearch's `query`, or most MCP tools) can't be disambiguated from an
+                // EARLIER call of the same tool name earlier in this session — one that may already be
+                // dispatched, with its `tool_dispatch_start` line already sitting in the IDE log tail.
+                // Matching it anyway used to resolve the ribbon the instant the watcher's first poll ran,
+                // even though the CURRENT request was still genuinely pending (live-caught: the ribbon
+                // vanishing right away for a repeated WebSearch/MCP call in the same chat). Skip rather
+                // than guess — this is exactly what "nil ⇒ no early IDE-log detection" already promised.
+                guard let wantSig, let bsig = inputSignature(block["input"]), bsig == wantSig else { continue }
                 return id
             }
         }

@@ -45,12 +45,20 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     private let ghostGrace: TimeInterval = 0.7
     private let ghostRebuildCooldown: TimeInterval = 2.0
     /// Remembered anchor edges so a content resize (ribbon appears, or size preset changes) re-pins the
-    /// tower in place instead of growing from the bottom-left: the vertical CENTER stays put (the ribbon
-    /// extends symmetrically from the light's middle, §6) and the tower's docked horizontal edge stays.
+    /// tower in place instead of growing from the bottom-left: the tower's docked horizontal edge stays
+    /// (`savedRight`/`savedLeft`), and vertically it stays pinned to whichever screen edge it's closer
+    /// to (`savedTowerNearBottom` picks `savedBottom` or `savedTop`) — the ribbon's HStack mirrors this
+    /// via `towerVerticalAlignment` below, so the tower's ON-SCREEN position never moves even when a
+    /// much-taller ribbon body appears: the frame simply grows AWAY from whichever edge it's docked to,
+    /// instead of growing symmetrically from a center that would shift the tower, or growing past the
+    /// physical screen edge where the ribbon becomes invisible/unreachable. See `windowDidResize`.
     /// Captured on the last move — NOT updated on resize — so toggling the ribbon returns to the same spot.
     private var savedCenterY: CGFloat?
     private var savedRight: CGFloat?
     private var savedLeft: CGFloat?
+    private var savedBottom: CGFloat?
+    private var savedTop: CGFloat?
+    private var savedTowerNearBottom = false
 
     /// New-alert detector + sound: the ribbon at the light IS the notification now (toasts are gone), so
     /// a newly-appearing request / question / completion chimes with our bundled alert sound. `alertedIds`
@@ -117,7 +125,12 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         if let panel = lightPanel, let screen = panel.screen ?? NSScreen.main {
             if settings.visible, !panel.isVisible { panel.orderFrontRegardless() }
             adjustingFrame = true
-            panel.setFrameOrigin(clamp(origin: panel.frame.origin, size: panel.frame.size, into: screen.visibleFrame))
+            // Full screen bounds, not `visibleFrame` — a Space switch fires this on EVERY desktop
+            // change, so clamping into the Dock-excluding `visibleFrame` here would yank a
+            // deliberately Dock-level placement back above the Dock on every single switch. This
+            // still catches a truly off-screen origin (e.g. after a monitor disconnect shrinks the
+            // display) without fighting where the user actually put it.
+            panel.setFrameOrigin(clamp(origin: panel.frame.origin, size: panel.frame.size, into: screen.frame))
             adjustingFrame = false
             captureAnchors(panel)
         }
@@ -397,11 +410,25 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         return n.map { "\($0.uint32Value)" } ?? "main"
     }
 
+    /// At cold launch the panel has never been placed on any screen, so `panel.screen` resolves to
+    /// whatever display contains its default (0,0) origin — NOT necessarily the monitor the user
+    /// last had it on. Resolve the target screen from the remembered `lastDisplayID` FIRST; only
+    /// fall back to `panel.screen ?? NSScreen.main` (today's pre-fix behavior) if that display is
+    /// unrecorded (upgrading users) or no longer connected (e.g. an external monitor unplugged).
     private func restorePosition(_ panel: NSPanel) {
+        if let lastID = settings.lastDisplayID,
+           let targetScreen = NSScreen.screens.first(where: { displayID($0) == lastID }),
+           let saved = settings.position(forDisplay: lastID) {
+            adjustingFrame = true
+            panel.setFrameOrigin(clamp(origin: saved, size: panel.frame.size, into: targetScreen.frame))
+            adjustingFrame = false
+            captureAnchors(panel)
+            return
+        }
         guard let screen = panel.screen ?? NSScreen.main else { return }
         if let saved = settings.position(forDisplay: displayID(screen)) {
             adjustingFrame = true
-            panel.setFrameOrigin(clamp(origin: saved, size: panel.frame.size, into: screen.visibleFrame))
+            panel.setFrameOrigin(clamp(origin: saved, size: panel.frame.size, into: screen.frame))
             adjustingFrame = false
         } else {
             let vis = screen.visibleFrame
@@ -419,6 +446,11 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         savedCenterY = panel.frame.midY
         savedRight = panel.frame.maxX
         savedLeft = panel.frame.minX
+        savedBottom = panel.frame.minY
+        savedTop = panel.frame.maxY
+        if let screen = panel.screen {
+            savedTowerNearBottom = panel.frame.midY < screen.frame.midY
+        }
     }
 
     private func clamp(origin: CGPoint, size: CGSize, into vis: CGRect) -> CGPoint {
@@ -431,33 +463,48 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     func windowDidMove(_ notification: Notification) {
         guard !adjustingFrame, let panel = lightPanel, panel === notification.object as? NSWindow,
               let screen = panel.screen else { return }
-        settings.setPosition(panel.frame.origin, forDisplay: displayID(screen))
+        let id = displayID(screen)
+        settings.setPosition(panel.frame.origin, forDisplay: id)
+        settings.lastDisplayID = id
         captureAnchors(panel)
         if expanded { positionExpandedPanel() }
     }
 
     func windowDidResize(_ notification: Notification) {
         // The content resizes when the ribbon appears/disappears or the size preset (S/M/L) changes.
-        // Re-pin so the tower stays put: keep the vertical CENTRE (ribbon grows from the light's middle)
-        // and the tower's docked horizontal edge — docked right → grow left, docked left → grow right —
-        // then clamp on-screen. Anchors come from the last move (not updated here), so toggling the
-        // ribbon returns to the exact same spot.
+        // The ribbon's HStack aligns the (shorter) tower to whichever edge `towerVerticalAlignment`
+        // picked (see below) — bottom-docked widgets align `.bottom`, top-docked ones `.top` — so the
+        // tower's ON-SCREEN edge position matches the FRAME's corresponding edge exactly. Pinning that
+        // same edge here (`savedBottom`/`savedTop`, matching `savedTowerNearBottom`) means the frame
+        // grows AWAY from the tower, in the direction with room: never re-centering the frame (which
+        // used to shift the tower itself — the "light jumps up" bug), and never letting the ribbon body
+        // extend past the physical screen edge into invisibility either (the earlier unclamped fix).
+        // Horizontal mirrors this: the tower sits at the frame's DOCKED edge, so pinning
+        // `savedRight`/`savedLeft` keeps it fixed as the ribbon grows toward the free side.
         guard !adjustingFrame, let panel = lightPanel, panel === notification.object as? NSWindow,
               let screen = panel.screen else { return }
-        let vis = screen.visibleFrame
+        let vis = screen.frame
         let f = panel.frame
         let towerOnRight = f.midX >= vis.midX
         var origin = f.origin
-        origin.y = (savedCenterY ?? f.midY) - f.height / 2
+        if savedTowerNearBottom {
+            origin.y = savedBottom ?? origin.y
+        } else {
+            origin.y = (savedTop ?? (origin.y + f.height)) - f.height
+        }
         if towerOnRight {
             if let r = savedRight { origin.x = r - f.width }
         } else {
             if let l = savedLeft { origin.x = l }
         }
-        let clamped = clamp(origin: origin, size: f.size, into: vis)
-        if clamped != f.origin {
+        // Only X gets a safety clamp (keeps the frame from sliding off a side edge if the screen
+        // configuration itself changed) — Y is anchored to the docked edge above, not clamped, so the
+        // tower never moves; the far (free) edge growing past the OTHER screen bound is an accepted
+        // edge case (a ribbon taller than the entire screen), not one this fixes.
+        origin.x = min(max(vis.minX + 6, origin.x), vis.maxX - f.width - 6)
+        if origin != f.origin {
             adjustingFrame = true
-            panel.setFrameOrigin(clamped)
+            panel.setFrameOrigin(origin)
             adjustingFrame = false
         }
         panel.invalidateShadow()   // window resized (ribbon toggled / size preset) → refresh native shadow
@@ -552,17 +599,26 @@ struct LightRootView: View {
         FloatingWidgetController.shared.ribbonExtendsLeftward ? .right : .left
     }
 
+    /// Which edge the tower is vertically pinned to — mirrors `FloatingWidgetController.windowDidResize`
+    /// so a taller ribbon body always grows AWAY from the tower's docked edge (never re-centering or
+    /// overflowing off-screen; see the doc comment on `towerVerticalAlignment`).
+    private var verticalAlignment: VerticalAlignment {
+        FloatingWidgetController.shared.towerVerticalAlignment
+    }
+
     var body: some View {
         Group {
             if ribbonItems.isEmpty {
-                LightTowerView(input: light, scale: settings.size.scale)
+                LightTowerView(input: light, scale: settings.size.scale, orientation: settings.orientation)
             } else {
                 PermissionRibbonView(
                     items: ribbonItems,
                     index: clampedIndexBinding,
                     anchor: anchor,
+                    verticalAlignment: verticalAlignment,
                     light: light,
                     scale: settings.size.scale,
+                    orientation: settings.orientation,
                     onAllow: { decide($0, .allowOnce) },
                     onDeny: { decide($0, .deny) },
                     onAll: { decide($0, .allowAll) },
@@ -609,4 +665,12 @@ extension FloatingWidgetController {
         guard let panel = lightPanel, let screen = panel.screen ?? NSScreen.main else { return true }
         return panel.frame.midX >= screen.visibleFrame.midX
     }
+
+    /// Which edge the tower is vertically docked to (bottom-docked → `.bottom`, e.g. at Dock level;
+    /// top-docked → `.top`, e.g. under the menu bar) — read from the CAPTURED `savedTowerNearBottom`
+    /// (set at the last drag), not recomputed live from the current frame. Unlike `ribbonExtendsLeftward`
+    /// (X never changes mid-resize, so live recompute is safe), the frame's midY moves AS the ribbon
+    /// grows — a live recompute could cross the screen's midpoint mid-resize and disagree with which
+    /// edge `windowDidResize` is actually pinning, which is exactly the bug this alignment prevents.
+    var towerVerticalAlignment: VerticalAlignment { savedTowerNearBottom ? .bottom : .top }
 }

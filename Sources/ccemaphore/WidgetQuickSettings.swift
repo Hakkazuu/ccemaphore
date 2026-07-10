@@ -36,6 +36,7 @@ struct WidgetQuickSettingsView: View {
             opacityRow
             sizeRow
             modeRow
+            orientationRow
             pinRow
         }
         .padding(.horizontal, embedded ? 12 : 13)
@@ -79,6 +80,19 @@ struct WidgetQuickSettingsView: View {
             HStack(spacing: 5) {
                 ForEach(WidgetSettings.DisplayMode.allCases) { mode in
                     modeSegment(mode)
+                }
+            }
+        }
+    }
+
+    /// Ориентация: label · vertical / horizontal segments — picks whether the three lamps stack or
+    /// run in a row. Same custom-pill style as the size/mode rows.
+    private var orientationRow: some View {
+        HStack(spacing: 10) {
+            rowLabel(L("widget.orientation"))
+            HStack(spacing: 5) {
+                ForEach(WidgetSettings.Orientation.allCases) { o in
+                    orientationSegment(o)
                 }
             }
         }
@@ -146,6 +160,30 @@ struct WidgetQuickSettingsView: View {
         switch mode {
         case .summary: L("widget.mode.summary")
         case .single:  L("widget.mode.single")
+        }
+    }
+
+    /// One vertical/horizontal pill; active segment uses the brighter neutral fill + primary text.
+    private func orientationSegment(_ o: WidgetSettings.Orientation) -> some View {
+        let active = settings.orientation == o
+        return Button {
+            settings.orientation = o
+        } label: {
+            Text(orientationLabel(o))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(active ? DS.textPrimary : DS.textSecondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .background(active ? DS.neutralBtnHover : DS.neutralBtn, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func orientationLabel(_ o: WidgetSettings.Orientation) -> String {
+        switch o {
+        case .vertical:   L("widget.orientation.vertical")
+        case .horizontal: L("widget.orientation.horizontal")
         }
     }
 }

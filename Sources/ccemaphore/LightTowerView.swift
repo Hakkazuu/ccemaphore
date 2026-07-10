@@ -45,6 +45,8 @@ struct LightTowerView: View {
     let input: LightInput
     /// Size factor from `WidgetSettings.WidgetSize.scale` (0.75 / 0.87 / 1.0 / 1.45 / 1.9).
     var scale: CGFloat = 1
+    /// Lamp layout: stacked (default) or a horizontal row (§8's orientation setting).
+    var orientation: WidgetSettings.Orientation = .vertical
 
     /// Transparent breathing room the *window* must leave around the housing so the lamp glows fade out
     /// instead of being hard-clipped at the panel edge. SwiftUI `.frame`/`.padding` don't clip content —
@@ -68,7 +70,7 @@ struct LightTowerView: View {
     @State private var ring = false
 
     var body: some View {
-        let g = Geo(detail: input.detail, scale: scale)
+        let g = Geo(detail: input.detail, scale: scale, orientation: orientation)
 
         return housing(g)
             .scaleEffect(input.urgent ? breatheScale : 1, anchor: .center)
@@ -81,13 +83,26 @@ struct LightTowerView: View {
     // MARK: - Housing
 
     private func housing(_ g: Geo) -> some View {
-        VStack(spacing: g.gap) {
-            slot(.red, g: g)
-            slot(.yellow, g: g)
-            slot(.green, g: g)
+        Group {
+            if orientation == .vertical {
+                VStack(spacing: g.gap) {
+                    slot(.red, g: g)
+                    slot(.yellow, g: g)
+                    slot(.green, g: g)
+                }
+            } else {
+                HStack(spacing: g.gap) {
+                    slot(.red, g: g)
+                    slot(.yellow, g: g)
+                    slot(.green, g: g)
+                }
+            }
         }
-        .padding(.horizontal, g.padX)
-        .padding(.vertical, g.padY)
+        // padX is tuned as the flanking padding on the SHORT axis (a single lamp's width in vertical
+        // mode), padY on the LONG axis (the 3-lamp stack) — swap which physical side each lands on
+        // so the padding still matches `housingW`/`housingH` once the axes themselves are swapped.
+        .padding(.horizontal, orientation == .vertical ? g.padX : g.padY)
+        .padding(.vertical, orientation == .vertical ? g.padY : g.padX)
         .frame(width: g.housingW, height: g.housingH)
         .background(
             // Real behind-window blur (NSVisualEffectView) + a translucent tint, both clipped to the
@@ -344,16 +359,24 @@ struct LightTowerView: View {
     /// All sizes for one render, pre-multiplied by `scale`, mirroring `renderVals()` in Light.dc.html.
     private struct Geo {
         let lamp, padX, padY, gap, housingW, housingH, radius: CGFloat
-        init(detail: Bool, scale: CGFloat) {
+        init(detail: Bool, scale: CGFloat, orientation: WidgetSettings.Orientation = .vertical) {
             lamp = (detail ? DS.Geo.lampSummary : DS.Geo.lampSingle) * scale
             padX = (detail ? DS.Geo.housingPadX : 7) * scale
             padY = DS.Geo.housingPadY * scale
             gap  = DS.Geo.lampGap * scale
-            housingW = lamp + padX * 2
-            housingH = lamp * 3 + gap * 2 + padY * 2
+            let short = lamp + padX * 2      // one lamp + the padding on its two flanking sides
+            let long  = lamp * 3 + gap * 2 + padY * 2   // three lamps + gaps + padding along the stack
+            if orientation == .vertical {
+                housingW = short
+                housingH = long
+            } else {
+                housingW = long
+                housingH = short
+            }
             // HTML: radius = round((detail?0.4:0.46) * W / size) — the `/size` cancels W's scale, so
-            // the effective radius is (factor * unscaled-W) * scale.
-            radius = (detail ? 0.4 : 0.46) * housingW
+            // the effective radius is (factor * unscaled-short-axis) * scale. Derived off `min(W, H)`
+            // (rather than hardcoding W) so it stays correct in both orientations.
+            radius = (detail ? 0.4 : 0.46) * min(housingW, housingH)
         }
     }
 }

@@ -32,6 +32,17 @@ final class StateEngine: ObservableObject {
     /// User-curated commands the permission hook auto-approves (no dialog, no ribbon). Surfaced + edited
     /// in Настройки; the hook reads the backing `trusted.json` directly on each call. See `TrustedCommands`.
     @Published private(set) var trustedCommands: [TrustedCommands.Entry] = []
+    /// Per-host connection status for the "Remote Hosts" UI (connected/error/last-seen). Keyed by
+    /// `RemoteHost.id`. Populated by `remotePoller`'s poll loop — see `Tuning.remotePollInterval`.
+    @Published private(set) var remoteHostStatuses: [String: RemoteTranscriptPoller.HostStatus] = [:]
+    /// Non-nil when the last remote decision relay failed after retrying — surfaced as a ribbon error
+    /// state (`remote.permission.relayFailed`) instead of silently dropping the click.
+    @Published private(set) var lastRemoteRelayError: String?
+    /// The configured remote host list, for the "Remote Hosts" settings section — reloaded after every
+    /// CRUD op so the UI (a plain value list, not a live file watch) stays in sync with `remote_hosts.json`.
+    @Published private(set) var remoteHosts: [RemoteHost] = []
+    /// Per-host "Test Connection" outcome, keyed by `RemoteHost.id` — transient UI feedback, not persisted.
+    @Published private(set) var remoteTestResults: [String: Result<String, RemoteExec.SSHError>] = [:]
     /// False when `~/.claude/projects` doesn't exist — Claude Code was never installed (or never run) on
     /// this machine, so an empty session list means "nothing to watch", not "all quiet". Drives the
     /// panel's "Claude Code не найден" hint. Specifically the projects dir, NOT `~/.claude`: we create
@@ -42,11 +53,20 @@ final class StateEngine: ObservableObject {
 
     private let store = SessionStore()
     private let usage = UsageProvider()
+    private let remotePoller = RemoteTranscriptPoller()
+    private let remotePermissionRelay = RemotePermissionRelay()
     private var watcher: TranscriptWatcher?
     private var statusWatcher: TranscriptWatcher?
     private var pendingWatcher: TranscriptWatcher?
     private var stateTimer: Timer?
     private var usageTimer: Timer?
+    private var remotePollTimer: Timer?
+    private var remotePendingTimer: Timer?
+    /// Latest remote pending requests (all hosts), merged into `pendingRequests` on every render.
+    private var remotePendingRequests: [PermissionBroker.PendingRequest] = []
+    /// Latest LOCAL pending requests, kept separately so `recomputePending` can merge it with
+    /// `remotePendingRequests` without either poll loop clobbering the other's contribution.
+    private var localPendingRequests: [PermissionBroker.PendingRequest] = []
     /// Runs only while `watchIDELog` is on AND a pending request has a `toolUseId` — polls the IDE log to
     /// drop the ribbon the moment the user answers in the IDE's own dialog. See `IDELogWatcher`.
     private var ideLogTimer: Timer?
@@ -138,6 +158,7 @@ final class StateEngine: ObservableObject {
         hooksInstalled = HooksInstaller.isInstalled()
         permissionHookInstalled = HooksInstaller.isPermissionHookInstalled()
         trustedCommands = TrustedCommands.load()
+        remoteHosts = RemoteHosts.load()
         accessibilityGranted = FocusResolver.accessibilityGranted
         let statusDir = HookHandler.statusDir
         try? FileManager.default.createDirectory(atPath: statusDir, withIntermediateDirectories: true)
@@ -173,6 +194,36 @@ final class StateEngine: ObservableObject {
         usageTimer = Timer.scheduledTimer(withTimeInterval: Tuning.usageRefresh, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { await self.refreshUsage() }
+        }
+
+        // Remote hosts: no FSEvents/hook-file-watch equivalent across SSH, so both are polled on their
+        // own timers, fully decoupled from the local `stateTimer`/`pendingWatcher` above — a slow or
+        // unreachable host can only stall its OWN poll tick, never local rendering.
+        remotePollTimer = Timer.scheduledTimer(withTimeInterval: Tuning.remotePollInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.pollRemoteSessions() }
+        }
+        pollRemoteSessions()
+        remotePendingTimer = Timer.scheduledTimer(withTimeInterval: Tuning.remotePendingPoll, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.pollRemotePending() }
+        }
+        pollRemotePending()
+    }
+
+    private func pollRemoteSessions() {
+        remotePoller.pollAll { [weak self] in
+            guard let self else { return }
+            self.remoteHostStatuses = self.remotePoller.hostStatuses
+            self.render()
+        }
+    }
+
+    private func pollRemotePending() {
+        remotePermissionRelay.pollAll { [weak self] reqs in
+            guard let self else { return }
+            self.remotePendingRequests = reqs
+            self.recomputePending()
         }
     }
 
@@ -240,16 +291,24 @@ final class StateEngine: ObservableObject {
     }
 
     private func refreshPending() async {
-        let pending = await Task.detached { PermissionBroker.listPending() }.value
-        activePendingSessions = Set(pending.map(\.sessionId))
+        localPendingRequests = await Task.detached { PermissionBroker.listPending() }.value
+        recomputePending()
+        updateIDELogWatch()
+    }
+
+    /// Merge local + remote pending requests into the published set. Called whenever EITHER side's poll
+    /// loop refreshes (`refreshPending` for local, `pollRemotePending` for remote) so neither clobbers
+    /// the other's latest contribution.
+    private func recomputePending() {
+        let all = localPendingRequests + remotePendingRequests
+        activePendingSessions = Set(all.map(\.sessionId))
         // Newest first so the most recent request sits at the top of the ribbon/panel's list.
-        pendingRequests = pending.sorted { $0.createdAt > $1.createdAt }
+        pendingRequests = all.sorted { $0.createdAt > $1.createdAt }
         // Keep the displayed state consistent with the pending set: the render() backstop downgrades a
         // permission `waiting` that has no live request, so a real request appearing/clearing must
         // re-render (this path doesn't otherwise trigger one). The ribbon at the light surfaces the
         // request now — no notification is posted (toasts were removed from the product).
         render()
-        updateIDELogWatch()
     }
 
     // MARK: - IDE-log watch (early permission resolution — WidgetSettings.watchIDELog, on by default)
@@ -362,6 +421,14 @@ final class StateEngine: ObservableObject {
         let now = Date()
         var byId: [String: SessionInfo] = [:]
         for s in rawSessions { byId[s.id] = s }
+
+        // Fold in the latest cached remote poll results. Safe unconditionally: remote ids live in the
+        // `"remote:<hostId>:<uuid>"` namespace (see `SessionInfo.id`), which can never collide with a
+        // local uuid, and remote entries are never touched by the local statusBySession/pending loops
+        // below (those only address ids that originate from `rawSessions`/`statusBySession`).
+        for hostSessions in remotePoller.lastSessions.values {
+            for (id, s) in hostSessions { byId[id] = s }
+        }
 
         for (id, st) in statusBySession {
             guard now.timeIntervalSince(st.updatedAt) <= staleWindow else { continue }
@@ -477,11 +544,24 @@ final class StateEngine: ObservableObject {
         // whose fresh status carries that event and which have NO live pending request (those get the
         // actionable decision ribbon instead). Persist until the next hook event flips them off waiting.
         attentionSessions = sessions.compactMap { s -> AttentionItem? in
-            guard s.state == .waiting, !activePendingSessions.contains(s.id),
-                  let st = statusBySession[s.id], now.timeIntervalSince(st.updatedAt) <= staleWindow
-            else { return nil }
+            guard s.state == .waiting, !activePendingSessions.contains(s.id) else { return nil }
+            // Local sessions carry this in `statusBySession` (already staleness-checked at merge time
+            // above); remote sessions carry the SAME information directly on `SessionInfo.lastEvent`,
+            // set by `RemoteTranscriptPoller`'s own (already staleness-checked) status overlay — without
+            // this fallback, a remote chat parked on `permission-native`/`question-native` (e.g. a
+            // permission request that timed out with nobody around to answer it) just sat red with no
+            // ribbon and no way to open it, since this computation only ever looked at local status.
+            let event: String?
+            if let st = statusBySession[s.id] {
+                guard now.timeIntervalSince(st.updatedAt) <= staleWindow else { return nil }
+                event = st.lastEvent
+            } else if s.isRemote {
+                event = s.lastEvent
+            } else {
+                return nil
+            }
             let kind: AttentionItem.Kind
-            switch st.lastEvent {
+            switch event {
             case "question-native":   kind = .question
             case "permission-native": kind = .permission
             default:                  return nil
@@ -616,7 +696,15 @@ final class StateEngine: ObservableObject {
     /// decision the blocking hook is polling for, then optimistically drops it from the list so the row
     /// disappears at once (the pending-dir watcher reconciles the authoritative state right after).
     func decidePermission(_ req: PermissionBroker.PendingRequest, _ decision: PermissionBroker.Decision) {
-        PermissionBroker.decide(requestId: req.requestId, decision)
+        if req.remoteHostId != nil {
+            remotePermissionRelay.decide(requestId: req.requestId, decision: decision) { [weak self] message in
+                self?.lastRemoteRelayError = Lf("remote.permission.relayFailed", message)
+            }
+            remotePendingRequests.removeAll { $0.requestId == req.requestId }
+        } else {
+            PermissionBroker.decide(requestId: req.requestId, decision)
+            localPendingRequests.removeAll { $0.requestId == req.requestId }
+        }
         pendingRequests.removeAll { $0.requestId == req.requestId }
         if !pendingRequests.contains(where: { $0.sessionId == req.sessionId }) {
             activePendingSessions.remove(req.sessionId)
@@ -636,6 +724,65 @@ final class StateEngine: ObservableObject {
     func removeTrustedCommand(_ entry: TrustedCommands.Entry) {
         trustedCommands = TrustedCommands.remove(entry)
         Log.settings.info("trusted remove tool=\(entry.tool.isEmpty ? "*" : entry.tool) pattern=\(entry.pattern)")
+    }
+
+    // MARK: - Remote hosts (SSH-monitored VS Code + Claude Code sessions on other machines)
+
+    func addRemoteHost(_ host: RemoteHost) {
+        remoteHosts = RemoteHosts.add(host)
+        pollRemoteSessions()
+    }
+
+    func updateRemoteHost(_ host: RemoteHost) {
+        remoteHosts = RemoteHosts.update(host)
+        pollRemoteSessions()
+    }
+
+    func removeRemoteHost(_ id: String) {
+        remoteHosts = RemoteHosts.remove(id: id)
+        remoteHostStatuses.removeValue(forKey: id)
+        remoteTestResults.removeValue(forKey: id)
+        // Drop that host's sessions from the light immediately rather than waiting for them to age out.
+        sessions.removeAll { $0.remoteHostId == id }
+        render()
+    }
+
+    func setRemoteHostEnabled(_ id: String, enabled: Bool) {
+        guard var host = remoteHosts.first(where: { $0.id == id }) else { return }
+        host.enabled = enabled
+        updateRemoteHost(host)
+    }
+
+    /// "Test Connection" UI action — runs a non-batch ssh (see `RemoteExec.testConnection`) so a
+    /// brand-new host's known_hosts prompt can complete once, and stores the detected platform on
+    /// success so `RemoteHooksInstaller` can refuse a non-macOS-incompatible install path later.
+    func testRemoteConnection(_ host: RemoteHost) {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = RemoteExec.testConnection(host)
+            await MainActor.run {
+                guard let self else { return }
+                self.remoteTestResults[host.id] = result
+                if case .success(let platform) = result {
+                    var updated = host
+                    updated.platform = platform
+                    self.remoteHosts = RemoteHosts.update(updated)
+                }
+            }
+        }
+    }
+
+    func installRemoteHooks(_ host: RemoteHost) {
+        Task.detached(priority: .userInitiated) {
+            do { try RemoteHooksInstaller.install(host) }
+            catch { Log.settings.error("remote hook install failed (\(host.label)): \(error.localizedDescription)") }
+        }
+    }
+
+    func uninstallRemoteHooks(_ host: RemoteHost) {
+        Task.detached(priority: .userInitiated) {
+            do { try RemoteHooksInstaller.uninstall(host) }
+            catch { Log.settings.error("remote hook uninstall failed (\(host.label)): \(error.localizedDescription)") }
+        }
     }
 
     /// Run a settings.json mutation and surface any failure (e.g. a malformed or unwritable file)

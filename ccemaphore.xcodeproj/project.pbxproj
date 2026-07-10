@@ -7,6 +7,20 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1F6D87182769E4E9D6357581 /* UIHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 164CD7428ED1AB36FD8F2CB6 /* UIHelpers.swift */; };
+		24DDF78E529FA2DBDE0AE616 /* TranscriptWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97349E4863FFAA0135D389EE /* TranscriptWatcher.swift */; };
+		28B01FEB2E31F3647ABAC315 /* StatusItemController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5D57D41F21E6AF39D68D100 /* StatusItemController.swift */; };
+		312FDE7CF27EA22EBCBF26BE /* RemoteHookShim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94ADF1621786826507C806CF /* RemoteHookShim.swift */; };
+		42BFE72128DCCACAD3731CD5 /* RemoteHosts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95DC7BE09A3068366F276FF6 /* RemoteHosts.swift */; };
+		4B21D07CADD82617F065E0D4 /* RemoteHostsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D315B5BF426D0B0CA436C630 /* RemoteHostsView.swift */; };
+		56EFC5346169108C3B451880 /* StatusReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3B827517981951CBD81DD7F /* StatusReader.swift */; };
+		5FC7E8F8E59510FC2A3DB19A /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1244FCE8537CDC2343656F7B /* App.swift */; };
+		69035280601EF71FAF826991 /* PermissionBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3D9A5CAF265A8946756D16F /* PermissionBroker.swift */; };
+		6F2E6B0D732175F1750A5040 /* RemoteHooksInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = E45FE8032ACA94CCD616E239 /* RemoteHooksInstaller.swift */; };
+		7057C75D88E992F10BD176F7 /* UsageProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70BEF57024FF518D6DFE63EE /* UsageProvider.swift */; };
+		76E31D07E2D08C7BEC5C4B7F /* HooksInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 258290C8C4A767BA6880623D /* HooksInstaller.swift */; };
+		852E8CD2611EF0C40351431E /* StateEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85DCF2DC454795A09140880B /* StateEngine.swift */; };
+		9C7CFDE5A301D81705A1D614 /* RemoteTranscriptPoller.swift in Sources */ = {isa = PBXBuildFile; fileRef = D34B4392D2726D83533F0ADC /* RemoteTranscriptPoller.swift */; };
 		A100000000000000000000B1 /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A1 /* DesignTokens.swift */; };
 		A100000000000000000000B2 /* WidgetSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A2 /* WidgetSettings.swift */; };
 		A100000000000000000000B3 /* LightTowerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A3 /* LightTowerView.swift */; };
@@ -15,24 +29,17 @@
 		A100000000000000000000B6 /* WidgetQuickSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A6 /* WidgetQuickSettings.swift */; };
 		A100000000000000000000B7 /* FloatingWidgetController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A7 /* FloatingWidgetController.swift */; };
 		A100000000000000000000F2 /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F1 /* Localization.swift */; };
-		A100000000000000000000F4 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F3 /* Localizable.xcstrings */; };
-		A100000000000000000000FD /* ccemaphore_notification.aiff in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000FC /* ccemaphore_notification.aiff */; };
-		A1000000000000000000AA1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000AA0 /* Assets.xcassets */; };
+		A100000000000000000000F4 /* Resources/Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F3 /* Resources/Localizable.xcstrings */; };
 		A100000000000000000000F7 /* AppPresence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* AppPresence.swift */; };
-		A100000000000000000000FF /* ProcTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000FE /* ProcTree.swift */; };
 		A100000000000000000000F9 /* Log.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F8 /* Log.swift */; };
-		1F6D87182769E4E9D6357581 /* UIHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 164CD7428ED1AB36FD8F2CB6 /* UIHelpers.swift */; };
-		24DDF78E529FA2DBDE0AE616 /* TranscriptWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97349E4863FFAA0135D389EE /* TranscriptWatcher.swift */; };
-		56EFC5346169108C3B451880 /* StatusReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3B827517981951CBD81DD7F /* StatusReader.swift */; };
-		5FC7E8F8E59510FC2A3DB19A /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1244FCE8537CDC2343656F7B /* App.swift */; };
-		69035280601EF71FAF826991 /* PermissionBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3D9A5CAF265A8946756D16F /* PermissionBroker.swift */; };
 		A100000000000000000000FB /* PermissionRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000FA /* PermissionRules.swift */; };
-		7057C75D88E992F10BD176F7 /* UsageProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70BEF57024FF518D6DFE63EE /* UsageProvider.swift */; };
-		76E31D07E2D08C7BEC5C4B7F /* HooksInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 258290C8C4A767BA6880623D /* HooksInstaller.swift */; };
-		852E8CD2611EF0C40351431E /* StateEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85DCF2DC454795A09140880B /* StateEngine.swift */; };
+		A100000000000000000000FD /* Resources/ccemaphore_notification.aiff in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000FC /* Resources/ccemaphore_notification.aiff */; };
+		A100000000000000000000FF /* ProcTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000FE /* ProcTree.swift */; };
+		A1000000000000000000AA1 /* Resources/Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000AA0 /* Resources/Assets.xcassets */; };
 		A2D130BE7D398C1AD709843E /* SessionPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EDB7102929AB2AAFBC8981B /* SessionPath.swift */; };
 		A6B710737851B7EF45A43EA4 /* Diagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB534796B193CDC41D52350E /* Diagnostic.swift */; };
 		B48D3D378375DC99D1410CF0 /* DeepLinker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46DE837FB57C497AF9F06708 /* DeepLinker.swift */; };
+		BC275A88577CDFEC1DB8EFD0 /* RemoteExec.swift in Sources */ = {isa = PBXBuildFile; fileRef = B674EDBE7EAFC64FE0976ADF /* RemoteExec.swift */; };
 		C6D5C73D21DCB7A5F30C1BA2 /* FocusResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 659D57D0511C57A0F3DD9784 /* FocusResolver.swift */; };
 		D14887E4C83F8DE21A6EFCEE /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 444EFF2E1337F8C7A7CBBE00 /* Models.swift */; };
 		D234952C5DF0F0C3CF5BE032 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1AB5B5956460E24290430C /* SessionStore.swift */; };
@@ -41,23 +48,10 @@
 		E19D014670ED5F53B6C02D31 /* TranscriptParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E1EB01DB8A29A35808C73AB /* TranscriptParser.swift */; };
 		E4636A56586E6399F30D796B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 599C6A9F5D48FDDB83C5839B /* AppDelegate.swift */; };
 		EB7FE703B9BF9EE5F55628D0 /* TailReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13D90CC7130957C0FD4DC1B4 /* TailReader.swift */; };
+		F8DB765B35B992CECFB121E8 /* RemotePermissionRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A773EC8B294700B4653181D9 /* RemotePermissionRelay.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		A100000000000000000000A1 /* DesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
-		A100000000000000000000A2 /* WidgetSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetSettings.swift; sourceTree = "<group>"; };
-		A100000000000000000000A3 /* LightTowerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LightTowerView.swift; sourceTree = "<group>"; };
-		A100000000000000000000A4 /* PermissionRibbonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionRibbonView.swift; sourceTree = "<group>"; };
-		A100000000000000000000A5 /* FloatingPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingPanelView.swift; sourceTree = "<group>"; };
-		A100000000000000000000A6 /* WidgetQuickSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetQuickSettings.swift; sourceTree = "<group>"; };
-		A100000000000000000000A7 /* FloatingWidgetController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingWidgetController.swift; sourceTree = "<group>"; };
-		A100000000000000000000F1 /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
-		A100000000000000000000F3 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Resources/Localizable.xcstrings; sourceTree = SOURCE_ROOT; };
-		A100000000000000000000FC /* ccemaphore_notification.aiff */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/ccemaphore_notification.aiff; sourceTree = SOURCE_ROOT; };
-		A1000000000000000000AA0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Resources/Assets.xcassets; sourceTree = SOURCE_ROOT; };
-		A100000000000000000000F6 /* AppPresence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPresence.swift; sourceTree = "<group>"; };
-		A100000000000000000000FE /* ProcTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcTree.swift; sourceTree = "<group>"; };
-		A100000000000000000000F8 /* Log.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Log.swift; sourceTree = "<group>"; };
 		1244FCE8537CDC2343656F7B /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		13859320BCE3F0958371A6A1 /* HookHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HookHandler.swift; sourceTree = "<group>"; };
 		13D90CC7130957C0FD4DC1B4 /* TailReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailReader.swift; sourceTree = "<group>"; };
@@ -73,12 +67,34 @@
 		7EDB7102929AB2AAFBC8981B /* SessionPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionPath.swift; sourceTree = "<group>"; };
 		83FCCB2D8917C76DAB2E10D3 /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
 		85DCF2DC454795A09140880B /* StateEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StateEngine.swift; sourceTree = "<group>"; };
+		94ADF1621786826507C806CF /* RemoteHookShim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHookShim.swift; sourceTree = "<group>"; };
+		95DC7BE09A3068366F276FF6 /* RemoteHosts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHosts.swift; sourceTree = "<group>"; };
 		97349E4863FFAA0135D389EE /* TranscriptWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptWatcher.swift; sourceTree = "<group>"; };
+		A100000000000000000000A1 /* DesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
+		A100000000000000000000A2 /* WidgetSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetSettings.swift; sourceTree = "<group>"; };
+		A100000000000000000000A3 /* LightTowerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LightTowerView.swift; sourceTree = "<group>"; };
+		A100000000000000000000A4 /* PermissionRibbonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionRibbonView.swift; sourceTree = "<group>"; };
+		A100000000000000000000A5 /* FloatingPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingPanelView.swift; sourceTree = "<group>"; };
+		A100000000000000000000A6 /* WidgetQuickSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetQuickSettings.swift; sourceTree = "<group>"; };
+		A100000000000000000000A7 /* FloatingWidgetController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingWidgetController.swift; sourceTree = "<group>"; };
+		A100000000000000000000F1 /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
+		A100000000000000000000F3 /* Resources/Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Resources/Localizable.xcstrings; sourceTree = SOURCE_ROOT; };
+		A100000000000000000000F6 /* AppPresence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPresence.swift; sourceTree = "<group>"; };
+		A100000000000000000000F8 /* Log.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Log.swift; sourceTree = "<group>"; };
+		A100000000000000000000FA /* PermissionRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionRules.swift; sourceTree = "<group>"; };
+		A100000000000000000000FC /* Resources/ccemaphore_notification.aiff */ = {isa = PBXFileReference; lastKnownFileType = audio.aiff; path = Resources/ccemaphore_notification.aiff; sourceTree = SOURCE_ROOT; };
+		A100000000000000000000FE /* ProcTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcTree.swift; sourceTree = "<group>"; };
+		A1000000000000000000AA0 /* Resources/Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Resources/Assets.xcassets; sourceTree = SOURCE_ROOT; };
+		A773EC8B294700B4653181D9 /* RemotePermissionRelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePermissionRelay.swift; sourceTree = "<group>"; };
 		AB534796B193CDC41D52350E /* Diagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostic.swift; sourceTree = "<group>"; };
 		AC1AB5B5956460E24290430C /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
+		B674EDBE7EAFC64FE0976ADF /* RemoteExec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteExec.swift; sourceTree = "<group>"; };
 		C3B827517981951CBD81DD7F /* StatusReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusReader.swift; sourceTree = "<group>"; };
+		D315B5BF426D0B0CA436C630 /* RemoteHostsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHostsView.swift; sourceTree = "<group>"; };
+		D34B4392D2726D83533F0ADC /* RemoteTranscriptPoller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTranscriptPoller.swift; sourceTree = "<group>"; };
 		D3D9A5CAF265A8946756D16F /* PermissionBroker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionBroker.swift; sourceTree = "<group>"; };
-		A100000000000000000000FA /* PermissionRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionRules.swift; sourceTree = "<group>"; };
+		D5D57D41F21E6AF39D68D100 /* StatusItemController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusItemController.swift; sourceTree = "<group>"; };
+		E45FE8032ACA94CCD616E239 /* RemoteHooksInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHooksInstaller.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -94,9 +110,9 @@
 			isa = PBXGroup;
 			children = (
 				2A3EF6A91B065EE8D9DEAF07 /* Sources */,
-				A100000000000000000000F3 /* Localizable.xcstrings */,
-				A100000000000000000000FC /* ccemaphore_notification.aiff */,
-				A1000000000000000000AA0 /* Assets.xcassets */,
+				A100000000000000000000F3 /* Resources/Localizable.xcstrings */,
+				A100000000000000000000FC /* Resources/ccemaphore_notification.aiff */,
+				A1000000000000000000AA0 /* Resources/Assets.xcassets */,
 				284A3B8D286C46267D6492C0 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -143,6 +159,14 @@
 				97349E4863FFAA0135D389EE /* TranscriptWatcher.swift */,
 				164CD7428ED1AB36FD8F2CB6 /* UIHelpers.swift */,
 				70BEF57024FF518D6DFE63EE /* UsageProvider.swift */,
+				D5D57D41F21E6AF39D68D100 /* StatusItemController.swift */,
+				B674EDBE7EAFC64FE0976ADF /* RemoteExec.swift */,
+				E45FE8032ACA94CCD616E239 /* RemoteHooksInstaller.swift */,
+				94ADF1621786826507C806CF /* RemoteHookShim.swift */,
+				95DC7BE09A3068366F276FF6 /* RemoteHosts.swift */,
+				D34B4392D2726D83533F0ADC /* RemoteTranscriptPoller.swift */,
+				A773EC8B294700B4653181D9 /* RemotePermissionRelay.swift */,
+				D315B5BF426D0B0CA436C630 /* RemoteHostsView.swift */,
 			);
 			path = ccemaphore;
 			sourceTree = "<group>";
@@ -205,6 +229,19 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		A100000000000000000000F5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A100000000000000000000F4 /* Resources/Localizable.xcstrings in Resources */,
+				A100000000000000000000FD /* Resources/ccemaphore_notification.aiff in Resources */,
+				A1000000000000000000AA1 /* Resources/Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		0C117087419A3E9786122495 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -241,23 +278,18 @@
 				24DDF78E529FA2DBDE0AE616 /* TranscriptWatcher.swift in Sources */,
 				1F6D87182769E4E9D6357581 /* UIHelpers.swift in Sources */,
 				7057C75D88E992F10BD176F7 /* UsageProvider.swift in Sources */,
+				28B01FEB2E31F3647ABAC315 /* StatusItemController.swift in Sources */,
+				BC275A88577CDFEC1DB8EFD0 /* RemoteExec.swift in Sources */,
+				6F2E6B0D732175F1750A5040 /* RemoteHooksInstaller.swift in Sources */,
+				312FDE7CF27EA22EBCBF26BE /* RemoteHookShim.swift in Sources */,
+				42BFE72128DCCACAD3731CD5 /* RemoteHosts.swift in Sources */,
+				9C7CFDE5A301D81705A1D614 /* RemoteTranscriptPoller.swift in Sources */,
+				F8DB765B35B992CECFB121E8 /* RemotePermissionRelay.swift in Sources */,
+				4B21D07CADD82617F065E0D4 /* RemoteHostsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXResourcesBuildPhase section */
-		A100000000000000000000F5 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				A100000000000000000000F4 /* Localizable.xcstrings in Resources */,
-				A100000000000000000000FD /* ccemaphore_notification.aiff in Resources */,
-				A1000000000000000000AA1 /* Assets.xcassets in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXResourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
 		2E8DF7DCF134D54E9A702AC2 /* Debug */ = {

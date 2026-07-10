@@ -234,6 +234,7 @@ struct FloatingPanelView: View {
             )
 
             trustedSection
+            RemoteHostsView(engine: engine)
 
             diagnosticsSection
         }
@@ -458,7 +459,7 @@ private struct GroupHeader: View {
 /// A settings section header: mono uppercase label · trailing hairline. Same idiom as `GroupHeader`
 /// (minus the count) so Settings reads as native to the rest of the panel — this replaces the boxed
 /// card + full-width divider the settings screen used to mix.
-private struct SettingsSectionHeader: View {
+struct SettingsSectionHeader: View {
     let label: String
     /// The first section sits right under the panel header rule, so it needs less top air than the
     /// gaps between sections.

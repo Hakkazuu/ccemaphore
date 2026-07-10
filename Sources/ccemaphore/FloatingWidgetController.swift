@@ -21,6 +21,14 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     private var lightPanel: LightPanel?
     private var expandedPanel: NSPanel?
     private var expanded = false
+    /// Set by `forceShowExpanded()` (the menu-bar "Open panel" escape hatch) so `hoverTick()` skips its
+    /// ribbon auto-collapse for this one open — cleared by `hideExpanded()`. See `forceShowExpanded`.
+    private var forcedOpen = false
+    /// Set by `togglePinnedPanel()` (left-click on the menu-bar status item — see `StatusItemController`)
+    /// to keep the panel open regardless of mouse position, until the SAME action closes it again. Unlike
+    /// `forcedOpen`, this bypasses `hoverTick()` ENTIRELY (checked first, before the ribbon-preemption
+    /// guard OR the mouse-leave collapse timer) — a true pin, not just a one-shot escape hatch.
+    private(set) var pinnedOpen = false
     private var cancellables = Set<AnyCancellable>()
     /// Guards `windowDidResize`/`windowDidMove` re-entrancy while WE are setting the frame.
     private var adjustingFrame = false
@@ -188,8 +196,10 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         // The ribbon at the visible light is where the user answers a permission request, so the broker
         // treats "widget visible" as "user is reachable now" (→ a real wait window).
         engine.setWidgetVisible(settings.visible)
-        // The ribbon owns the light — never overlap it with the hover panel.
-        if hasRibbon, expanded { hideExpanded() }
+        // The ribbon owns the light — never overlap it with the hover panel (unless the user explicitly
+        // force-opened it via the menu-bar "Open panel" item, or pinned it open — see `forceShowExpanded`
+        // / `togglePinnedPanel`).
+        if hasRibbon, expanded, !forcedOpen, !pinnedOpen { hideExpanded() }
         // The ribbon IS the notification now: chime when a genuinely NEW live request, question, or
         // completion appears. An id that merely flickered out and back within `alertReChimeCooldown`
         // (a transient state flap, or the pre-fix-3a click round-trip) is NOT re-chimed; a continuously
@@ -246,8 +256,13 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
 
     private func hoverTick() {
         guard let light = lightPanel, light.isVisible, settings.visible else { return }
-        // While the ribbon is on screen it owns the light — suppress the hover panel.
-        if hasRibbon {
+        // Pinned open (menu-bar left-click) bypasses hover entirely — no ribbon-preemption check, no
+        // mouse-leave collapse timer. Only `togglePinnedPanel()` closes it.
+        if pinnedOpen { return }
+        // While the ribbon is on screen it owns the light — suppress the hover panel. Skipped when the
+        // user explicitly force-opened it (menu-bar "Open panel"): normal mouse-leaves-the-panel
+        // collapse still applies below, just not this auto-collapse-because-a-request-arrived path.
+        if hasRibbon, !forcedOpen {
             if expanded { hideExpanded() }
             return
         }
@@ -360,6 +375,34 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         Log.watcher.warn("hover panel rebuilt (ghost window: isVisible without occlusion .visible)")
     }
 
+    /// Force-open the management panel regardless of ribbon/hover state. `hoverTick()`'s `hasRibbon`
+    /// guard deliberately yields the light to the permission ribbon (see its doc comment) — which also
+    /// means hover can't open the panel AT ALL while a request is pending, with no other way in. This
+    /// is the escape hatch: wired to the always-available menu-bar dropdown item (`CcemaphoreApp`, not
+    /// gated by the ribbon), so Настройки/История/Обновить/Выход stay reachable even when red.
+    /// `forcedOpen` tells `hoverTick()` to skip its ribbon auto-collapse for THIS open — normal
+    /// mouse-leaves-the-panel collapse still applies, and any panel action (or the ribbon getting a NEW
+    /// event) that calls `hideExpanded()` clears the flag.
+    func forceShowExpanded() {
+        guard lightPanel != nil, settings.visible else { return }
+        forcedOpen = true
+        if !expanded { showExpanded() }
+    }
+
+    /// Left-click on the menu-bar status item (`StatusItemController`) — open the panel and PIN it open
+    /// (no hover-based auto-collapse at all, see the `pinnedOpen` guard at the top of `hoverTick()`), or
+    /// if it's already pinned, unpin and close it. This is the "stays open until clicked again" behavior
+    /// requested for the menu-bar icon, distinct from `forceShowExpanded`'s one-shot escape hatch.
+    func togglePinnedPanel() {
+        guard lightPanel != nil, settings.visible else { return }
+        if pinnedOpen {
+            hideExpanded()
+        } else {
+            pinnedOpen = true
+            if !expanded { showExpanded() }
+        }
+    }
+
     /// Hide the management panel (hover left, or a panel action asked to close). Public alias for the
     /// panel's own ▾ button. Never re-enters `applyWindowState` (that recursed in v1).
     func hideExpanded() {
@@ -368,6 +411,8 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         expandedSince = nil
         insideSince = nil
         outsideSince = nil
+        forcedOpen = false
+        pinnedOpen = false
         expandedPanel?.orderOut(nil)
         updateLightOpacity()
         if wasExpanded { Log.watcher.debug("hover collapse") }
@@ -467,13 +512,16 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
 
 // MARK: - Light panel subclass
 
-/// Borderless non-activating panel that can still become key when a control genuinely needs it. Clicks
-/// on the light are intentionally inert (the management panel opens on HOVER, not click); a right-click
-/// is swallowed so it can't surface a stray menu.
+/// Borderless non-activating panel that can still become key when a control genuinely needs it. A plain
+/// (left) click on the light is intentionally inert (the management panel opens on HOVER, not click);
+/// a RIGHT-click force-opens the management panel — the same escape hatch as the menu-bar "Открыть
+/// панель" item, just reachable at the light itself instead of only from the menu bar.
 final class LightPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
-    override func rightMouseDown(with event: NSEvent) { /* intentionally inert */ }
+    override func rightMouseDown(with event: NSEvent) {
+        FloatingWidgetController.shared.forceShowExpanded()
+    }
 }
 
 /// The hover management panel. Borderless panels default `canBecomeKey` to false, which starves the
@@ -509,17 +557,22 @@ struct LightRootView: View {
                        branch: session?.gitBranch ?? "",
                        command: req.detail ?? req.summary,
                        chatTitle: session?.title,
-                       host: h.host, hostBundleId: h.bundleId)
+                       host: h.host, hostBundleId: h.bundleId,
+                       remoteHostLabel: req.remoteHostId.flatMap { RemoteHosts.resolve($0)?.label },
+                       remoteHostId: req.remoteHostId)
         }
     }
     /// Chats parked on a native prompt / question the user answers in Cursor — the red attention items.
     private var attentionItems: [RibbonItem] {
         engine.attentionSessions.map { a in
             let h = engine.hostInfo(for: a.id)
+            let session = engine.sessions.first { $0.id == a.id }
             return RibbonItem(id: a.id, kind: .attention(a.kind), sessionId: a.id, cwd: a.cwd,
                        project: a.project, branch: a.branch, command: nil,
-                       chatTitle: engine.sessions.first { $0.id == a.id }?.title,
-                       host: h.host, hostBundleId: h.bundleId)
+                       chatTitle: session?.title,
+                       host: h.host, hostBundleId: h.bundleId,
+                       remoteHostLabel: session?.remoteHostId.flatMap { RemoteHosts.resolve($0)?.label },
+                       remoteHostId: session?.remoteHostId)
         }
     }
     /// Transient GREEN "chat finished" notices.
@@ -592,7 +645,8 @@ struct LightRootView: View {
     /// decision here: the user answers in Cursor's own dialog, and the broker's external-resolution
     /// detection then drops the request — so the ribbon stays truthful (red) until it's actually answered.
     private func openChat(_ r: RibbonItem) {
-        DeepLinker.focus(sessionId: r.sessionId, cwd: r.cwd, host: r.host, hostBundleId: r.hostBundleId)
+        DeepLinker.focus(sessionId: r.sessionId, cwd: r.cwd, host: r.host, hostBundleId: r.hostBundleId,
+                         remoteHostId: r.remoteHostId)
         // A completion notice is informational; jumping to it clears it (it also auto-expires).
         if r.isCompleted { engine.dismissCompletion(r.sessionId) }
     }

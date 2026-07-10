@@ -65,7 +65,11 @@ enum PermissionBroker {
 
     struct PendingRequest: Codable, Sendable {
         let requestId: String
-        let sessionId: String
+        // `var`, not `let`: `RemotePermissionRelay` rewrites this to the namespaced
+        // `"remote:<hostId>:<uuid>"` form after decoding a remote pending file (which carries the plain
+        // uuid the remote hook shim knows, matching what `SessionInfo.id` uses for remote sessions) — see
+        // its doc comment for why this must match or the render()-side force-red rule silently no-ops.
+        var sessionId: String
         let tool: String
         let summary: String
         /// The raw command / file path / URL being requested — shown in the ribbon's `$ …` chip
@@ -79,6 +83,11 @@ enum PermissionBroker {
         /// (which fires at approval, before completion) to THIS request. nil ⇒ no early IDE-log detection
         /// for this request (falls back to completion-time resolution). Optional for back-compat decode.
         let toolUseId: String?
+        /// Set by `RemotePermissionRelay` after fetching this request from a remote host's pending dir —
+        /// never present in the JSON itself (local pending files never carry it; decodes to nil, matching
+        /// a local request). Routes `StateEngine.decidePermission` to the relay instead of the local
+        /// broker, and drives the ribbon's host badge.
+        var remoteHostId: String? = nil
     }
 
     // MARK: - Hook side (blocking; runs as `--hook permission` [PreToolUse] / `--hook permission-request`)

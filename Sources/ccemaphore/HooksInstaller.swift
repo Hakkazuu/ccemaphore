@@ -11,7 +11,7 @@ import Foundation
 ///    the whole file, and removes only what it added. Every other key is preserved verbatim.
 enum HooksInstaller {
     /// (Claude Code event, our `--hook` keyword, whether the event uses a tool matcher).
-    private static let events: [(event: String, keyword: String, matcher: Bool)] = [
+    static let events: [(event: String, keyword: String, matcher: Bool)] = [
         ("SessionStart", "start", false),
         ("SessionEnd", "end", false),
         ("UserPromptSubmit", "prompt", false),
@@ -94,9 +94,24 @@ enum HooksInstaller {
     // MARK: - Install / uninstall (mutating; strict — abort rather than risk the file)
 
     static func install() throws {
-        var root = try loadSettingsStrict()
+        let root = try mergeInstall(root: try loadSettingsStrict(), exe: executablePath)
+        try writeSettings(root)
+        Log.settings.info("installed basic hooks → \(settingsPath) (exe=\(executablePath))")
+    }
+
+    static func installPermissionHook() throws {
+        let root = try mergeInstallPermission(root: try loadSettingsStrict(), exe: executablePath)
+        try writeSettings(root)
+        Log.settings.info("installed PermissionRequest hook → \(settingsPath)")
+    }
+
+    // MARK: - Transport-agnostic merge (pure — no IO). Shared with `RemoteHooksInstaller`, which reads/
+    // writes the SAME `~/.claude/settings.json` shape over SSH instead of the local filesystem; `exe` is
+    // whatever path the hook should invoke (local binary path here, the remote shim path there).
+
+    static func mergeInstall(root: [String: Any], exe: String) throws -> [String: Any] {
+        var root = root
         var hooks = try hooksObject(root)
-        let exe = executablePath
         for e in events {
             var arr = try eventArray(hooks, e.event)
             arr.removeAll(where: isOurBasic)                   // idempotent; leaves permission entry intact
@@ -104,12 +119,11 @@ enum HooksInstaller {
             hooks[e.event] = arr
         }
         root["hooks"] = hooks
-        try writeSettings(root)
-        Log.settings.info("installed basic hooks → \(settingsPath) (exe=\(exe))")
+        return root
     }
 
-    static func installPermissionHook() throws {
-        var root = try loadSettingsStrict()
+    static func mergeInstallPermission(root: [String: Any], exe: String) throws -> [String: Any] {
+        var root = root
         var hooks = try hooksObject(root)
         // Migrate away any legacy PreToolUse front-run entry we used to install (keeps the basic `pre`).
         var pre = try eventArray(hooks, "PreToolUse")
@@ -119,17 +133,35 @@ enum HooksInstaller {
         }
         var arr = try eventArray(hooks, "PermissionRequest")
         arr.removeAll(where: isPermissionEntry)
-        arr.append(permissionEntry(exe: executablePath))
+        arr.append(permissionEntry(exe: exe))
         hooks["PermissionRequest"] = arr
         root["hooks"] = hooks
-        try writeSettings(root)
-        Log.settings.info("installed PermissionRequest hook → \(settingsPath)")
+        return root
+    }
+
+    static func mergeUninstall(root: [String: Any]) throws -> [String: Any] {
+        var root = root
+        guard var hooks = root["hooks"] as? [String: Any] else { return root }
+        for event in Set(events.map(\.event) + ["PreToolUse", "PermissionRequest"]) {
+            guard var arr = hooks[event] as? [[String: Any]] else { continue }   // preserve unknown shapes
+            arr.removeAll(where: isAnyOurs)
+            if arr.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = arr }
+        }
+        if hooks.isEmpty { root.removeValue(forKey: "hooks") } else { root["hooks"] = hooks }
+        return root
+    }
+
+    static func isAnyInstalled(root: [String: Any]) -> Bool {
+        guard let hooks = root["hooks"] as? [String: Any] else { return false }
+        return events.contains { e in
+            (hooks[e.event] as? [[String: Any]])?.contains(where: isOurBasic) ?? false
+        }
     }
 
     /// The interactive permission entry we own — the `PermissionRequest` hook, which fires precisely when
     /// Claude shows a permission dialog. `timeout` here is Claude Code's outer kill-deadline; the hook's
     /// actual wait is the (shorter) `Tuning.permissionPollTimeout`, so this must stay above it.
-    private static func permissionEntry(exe: String) -> [String: Any] {
+    static func permissionEntry(exe: String) -> [String: Any] {
         ["matcher": permissionMatcher, "hooks": [[
             "type": "command",
             "command": command(keyword: "permission-request", exe: exe),
@@ -155,14 +187,7 @@ enum HooksInstaller {
 
     /// Full removal of everything ccemaphore added (basic + permission).
     static func uninstall() throws {
-        var root = try loadSettingsStrict()
-        guard var hooks = root["hooks"] as? [String: Any] else { return }
-        for event in Set(events.map(\.event) + ["PreToolUse", "PermissionRequest"]) {
-            guard var arr = hooks[event] as? [[String: Any]] else { continue }   // preserve unknown shapes
-            arr.removeAll(where: isAnyOurs)
-            if arr.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = arr }
-        }
-        if hooks.isEmpty { root.removeValue(forKey: "hooks") } else { root["hooks"] = hooks }
+        let root = try mergeUninstall(root: try loadSettingsStrict())
         try writeSettings(root)
         Log.settings.info("uninstalled all hooks → \(settingsPath)")
     }
@@ -250,7 +275,7 @@ enum HooksInstaller {
 
     // MARK: - Entry construction
 
-    private static func entry(keyword: String, matcher: Bool, exe: String) -> [String: Any] {
+    static func entry(keyword: String, matcher: Bool, exe: String) -> [String: Any] {
         let hook: [String: Any] = [
             "type": "command",
             "command": command(keyword: keyword, exe: exe),
@@ -262,13 +287,13 @@ enum HooksInstaller {
     }
 
     /// `"<escaped-exe>" --hook <keyword>` — the exact command we own. Quoted + escaped for /bin/sh.
-    private static func command(keyword: String, exe: String) -> String {
+    static func command(keyword: String, exe: String) -> String {
         "\(shQuote(exe)) --hook \(keyword)"
     }
 
     /// Wrap a path in double quotes and escape the characters still special inside "" for /bin/sh.
     /// Backslash first so we don't double-escape the escapes we add.
-    private static func shQuote(_ path: String) -> String {
+    static func shQuote(_ path: String) -> String {
         var s = path
         for (from, to) in [("\\", "\\\\"), ("\"", "\\\""), ("`", "\\`"), ("$", "\\$")] {
             s = s.replacingOccurrences(of: from, with: to)
@@ -284,14 +309,14 @@ enum HooksInstaller {
     /// Our basic entry: a quoted-path invocation referencing ccemaphore that ends in one of OUR basic
     /// `--hook <kw>` keywords. The structural match stops us deleting a user command that merely
     /// mentions "ccemaphore"; the ccemaphore anchor stops us deleting an unrelated `"x" --hook stop`.
-    private static func isOurBasic(_ entry: [String: Any]) -> Bool {
+    static func isOurBasic(_ entry: [String: Any]) -> Bool {
         commands(entry).contains { cmd in
             cmd.hasPrefix("\"") && cmd.contains("ccemaphore")
                 && basicKeywords.contains { cmd.hasSuffix(" --hook \($0)") }
         }
     }
     /// Our current permission entry: the `PermissionRequest` hook (`--hook permission-request`).
-    private static func isPermissionEntry(_ entry: [String: Any]) -> Bool {
+    static func isPermissionEntry(_ entry: [String: Any]) -> Bool {
         commands(entry).contains {
             $0.hasPrefix("\"") && $0.contains("ccemaphore") && $0.hasSuffix(" --hook permission-request")
         }
@@ -299,12 +324,12 @@ enum HooksInstaller {
     /// The legacy permission entry: the old `PreToolUse` front-run (`--hook permission`). Recognized only
     /// so install/uninstall/heal can migrate or remove it; it is never re-added. The ` --hook permission`
     /// suffix can't collide with ` --hook permission-request` (different trailing text).
-    private static func isLegacyPermissionEntry(_ entry: [String: Any]) -> Bool {
+    static func isLegacyPermissionEntry(_ entry: [String: Any]) -> Bool {
         commands(entry).contains {
             $0.hasPrefix("\"") && $0.contains("ccemaphore") && $0.hasSuffix(" --hook permission")
         }
     }
-    private static func isAnyOurs(_ entry: [String: Any]) -> Bool {
+    static func isAnyOurs(_ entry: [String: Any]) -> Bool {
         isOurBasic(entry) || isPermissionEntry(entry) || isLegacyPermissionEntry(entry)
     }
 
@@ -332,13 +357,13 @@ enum HooksInstaller {
         return dict
     }
 
-    private static func hooksObject(_ root: [String: Any]) throws -> [String: Any] {
+    static func hooksObject(_ root: [String: Any]) throws -> [String: Any] {
         guard let v = root["hooks"] else { return [:] }
         guard let dict = v as? [String: Any] else { throw HookError.unexpectedShape(L("shape.hooksNotObject")) }
         return dict
     }
 
-    private static func eventArray(_ hooks: [String: Any], _ event: String) throws -> [[String: Any]] {
+    static func eventArray(_ hooks: [String: Any], _ event: String) throws -> [[String: Any]] {
         guard let v = hooks[event] else { return [] }
         guard let arr = v as? [[String: Any]] else {
             throw HookError.unexpectedShape(Lf("shape.eventNotArray", event))

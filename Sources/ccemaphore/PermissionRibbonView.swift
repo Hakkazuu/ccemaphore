@@ -28,6 +28,12 @@ struct RibbonItem: Identifiable, Equatable {
     /// keep older call sites compiling; the builders fill them from `StateEngine.hostInfo`.
     var host: SessionHost = .unknown
     var hostBundleId: String? = nil
+    /// Non-nil ⇒ this item is for a session on a remote host (its `RemoteHost.label`) — shown as a small
+    /// pill next to the project name so the user can tell a remote request apart from a local one.
+    var remoteHostLabel: String? = nil
+    /// The `RemoteHost.id` this item's session came from, if remote — lets `onOpenChat` route to
+    /// `DeepLinker`'s remote (VS Code Remote-SSH deep-link) path instead of the local Cursor/terminal one.
+    var remoteHostId: String? = nil
 
     var isDecision: Bool { if case .decision = kind { return true } else { return false } }
     var isCompleted: Bool { if case .completed = kind { return true } else { return false } }
@@ -218,6 +224,15 @@ struct PermissionRibbonView: View {
                     .foregroundStyle(DS.textTertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+            }
+            if let label = r.remoteHostLabel {
+                Text(Lf("remote.badge.host", label))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(DS.textSecondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(DS.neutralBtn, in: Capsule())
+                    .lineLimit(1)
             }
         }
     }

@@ -31,6 +31,12 @@ struct StatusEntry: Sendable {
     /// `last_event` check alone). `nonBrokerEvent` names that last non-broker event, for the decision log.
     let nonBrokerSeq: Int?
     let nonBrokerEvent: String?
+    /// Per-origin tag. nil for a LOCAL status file (`StatusReader.readAll`); set to the owning
+    /// `RemoteHost.id` when `RemoteTranscriptPoller` folds a remote host's status into the SAME
+    /// `statusBySession` merge — so local-only behaviours (pid-reap via `ProcTree`) can gate on
+    /// `remoteHostId == nil` while every other status rule (demote / suppressDone / native-wait /
+    /// compacting) serves remote sessions for free. Defaulted so the memberwise init is unchanged.
+    var remoteHostId: String? = nil
 }
 
 enum StatusReader {
@@ -56,8 +62,15 @@ enum StatusReader {
 
     /// Decode one status file into a `StatusEntry`; nil on any missing/garbled field.
     private static func parse(path: String) -> StatusEntry? {
-        guard let data = FileManager.default.contents(atPath: path),
-              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return parse(data: data)
+    }
+
+    /// Same decode, from already-fetched bytes — used for local files above, and by
+    /// `RemoteTranscriptPoller` to parse a remote status file's bytes (fetched over SSH) with the
+    /// identical field mapping, so the two sources can never silently drift apart.
+    static func parse(data: Data) -> StatusEntry? {
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let id = json["session_id"] as? String,
               let stateRaw = json["state"] as? String,
               let updatedRaw = json["updated_at"] as? String,
@@ -86,13 +99,5 @@ enum StatusReader {
                            nonBrokerSeq: nonBrokerSeq, nonBrokerEvent: nonBrokerEvent)
     }
 
-    /// `Date.ISO8601FormatStyle` is a Sendable value type — safe to share/parse concurrently with no
-    /// lock (unlike the reference-type `ISO8601DateFormatter` it replaces). Tries fractional first,
-    /// then plain, matching what the hook handler writes.
-    private static let isoFrac = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-    private static let isoPlain = Date.ISO8601FormatStyle()
-
-    private static func parseISO(_ s: String) -> Date? {
-        (try? isoFrac.parse(s)) ?? (try? isoPlain.parse(s))
-    }
+    private static func parseISO(_ s: String) -> Date? { ISOTime.parse(s) }
 }

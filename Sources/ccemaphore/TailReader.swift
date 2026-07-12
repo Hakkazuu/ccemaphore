@@ -46,6 +46,23 @@ enum TailReader {
         }
     }
 
+    /// The byte-window → complete-lines transform, for a caller that already holds a tail-window `Data`
+    /// (e.g. `RemoteTranscriptPoller`, whose bytes arrive over SSH from `tail -c`, not a local
+    /// `FileHandle`). Same two safety rules as `tailLines`: when the window was seeked into the middle of
+    /// the file (`seekedIntoMiddle`), drop the partial FIRST line so a multi-byte UTF-8 char split across
+    /// the window edge can't poison the decode; and decode each line LOSSILY so an invalid byte never
+    /// nils the whole tail. The giant-line whole-file recovery (window entirely inside one line, no
+    /// newline) needs the file handle, so a windowed caller gets an empty result for that rare case —
+    /// behaviourally the same as the previous strict decode, which also produced no records there.
+    static func completeLines(inWindow data: Data, seekedIntoMiddle: Bool) -> [String] {
+        var data = data
+        if seekedIntoMiddle {
+            guard let nl = data.firstIndex(of: newline) else { return [] }
+            data = Data(data[data.index(after: nl)...])
+        }
+        return splitLines(data)
+    }
+
     private static func splitLines(_ data: Data) -> [String] {
         data.split(separator: newline, omittingEmptySubsequences: true)
             .map { String(decoding: $0, as: UTF8.self) }

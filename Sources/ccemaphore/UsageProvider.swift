@@ -212,13 +212,7 @@ actor UsageProvider {
         return dayFormatter.string(from: date)
     }
 
-    static func localDate(_ iso: String) -> Date? {
-        (try? isoFrac.parse(iso)) ?? (try? isoPlain.parse(iso))
-    }
-
-    // Sendable value-type parsers — no `nonisolated(unsafe)`, safe to share without a lock.
-    private static let isoFrac = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-    private static let isoPlain = Date.ISO8601FormatStyle()
+    static func localDate(_ iso: String) -> Date? { ISOTime.parse(iso) }
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.timeZone = .current; return f
     }()

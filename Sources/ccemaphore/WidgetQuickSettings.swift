@@ -36,6 +36,7 @@ struct WidgetQuickSettingsView: View {
             opacityRow
             sizeRow
             modeRow
+            orientationRow
             pinRow
         }
         .padding(.horizontal, embedded ? 12 : 13)
@@ -84,6 +85,19 @@ struct WidgetQuickSettingsView: View {
         }
     }
 
+    /// Ориентация: label · vertical / horizontal segments — picks whether the three lamps stack or
+    /// run in a row. Same custom-pill style as the size/mode rows.
+    private var orientationRow: some View {
+        HStack(spacing: 10) {
+            rowLabel(L("widget.orientation"))
+            HStack(spacing: 5) {
+                ForEach(WidgetSettings.Orientation.allCases) { o in
+                    orientationSegment(o)
+                }
+            }
+        }
+    }
+
     /// Закрепить позицию: label · trailing switch. Tinted green when on (the lock is engaged).
     private var pinRow: some View {
         HStack {
@@ -110,42 +124,30 @@ struct WidgetQuickSettingsView: View {
 
     /// One XS/S/M/L/XL pill; active segment uses the brighter neutral fill + primary text.
     private func sizeSegment(_ size: WidgetSettings.WidgetSize) -> some View {
-        let active = settings.size == size
-        return Button {
-            settings.size = size
-        } label: {
-            Text(size.letter)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(active ? DS.textPrimary : DS.textSecondary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 5)
-                .background(active ? DS.neutralBtnHover : DS.neutralBtn, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+        segmentPill(size.letter, active: settings.size == size, mono: true) { settings.size = size }
     }
 
     /// One доска/один-цвет pill; active segment uses the brighter neutral fill + primary text.
     private func modeSegment(_ mode: WidgetSettings.DisplayMode) -> some View {
-        let active = settings.displayMode == mode
-        return Button {
-            settings.displayMode = mode
-        } label: {
-            Text(modeLabel(mode))
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(active ? DS.textPrimary : DS.textSecondary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 5)
-                .background(active ? DS.neutralBtnHover : DS.neutralBtn, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+        segmentPill(modeLabel(mode), active: settings.displayMode == mode) { settings.displayMode = mode }
     }
 
     private func modeLabel(_ mode: WidgetSettings.DisplayMode) -> String {
         switch mode {
         case .summary: L("widget.mode.summary")
         case .single:  L("widget.mode.single")
+        }
+    }
+
+    /// One vertical/horizontal pill; active segment uses the brighter neutral fill + primary text.
+    private func orientationSegment(_ o: WidgetSettings.Orientation) -> some View {
+        segmentPill(orientationLabel(o), active: settings.orientation == o) { settings.orientation = o }
+    }
+
+    private func orientationLabel(_ o: WidgetSettings.Orientation) -> String {
+        switch o {
+        case .vertical:   L("widget.orientation.vertical")
+        case .horizontal: L("widget.orientation.horizontal")
         }
     }
 }

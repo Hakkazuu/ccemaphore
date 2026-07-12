@@ -20,11 +20,13 @@ enum SessionPath {
     static let projectsRoot: String =
         (NSHomeDirectory() as NSString).appendingPathComponent(".claude/projects")
 
-    /// Map a concrete file path to its transcript kind. Pure/structural, no IO.
-    static func classify(_ path: String) -> TranscriptKind {
+    /// Map a concrete file path to its transcript kind. Pure/structural, no IO. `root` defaults to the
+    /// local projects dir; pass an expanded remote root (see `RemoteTranscriptPoller`) to reuse the exact
+    /// same structural rules for `$HOME`-expanded remote paths instead of a parallel copy.
+    static func classify(_ path: String, root: String = projectsRoot) -> TranscriptKind {
         // `.jsonl` for transcripts; `.json` only so the workflow completion record can be recognised.
         guard path.hasSuffix(".jsonl") || path.hasSuffix(".json") else { return .ignored }
-        let prefix = projectsRoot + "/"
+        let prefix = root + "/"
         guard path.hasPrefix(prefix) else { return .ignored }
 
         let rel = String(path.dropFirst(prefix.count))

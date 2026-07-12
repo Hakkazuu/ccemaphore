@@ -38,6 +38,32 @@ enum FocusResolver {
         return copyString(window, kAXTitleAttribute)
     }
 
+    /// Every ON-SCREEN window of a running app, paired with its title — unlike `focusedWindowTitle`,
+    /// this doesn't require the app to already be frontmost. Used by `DeepLinker.focusRemote` to find an
+    /// already-open VS Code Remote-SSH window by matching the host in its title (VS Code titles a
+    /// Remote-SSH window `… [SSH: <host>]`), so a remote jump can RAISE the existing window instead of
+    /// asking the `code` CLI / `vscode://` URI to open one — both of which were observed to always spawn
+    /// a fresh window rather than reusing one already open for that remote folder.
+    static func windowTitles(pid: pid_t) -> [(window: AXUIElement, title: String)] {
+        guard AXIsProcessTrusted() else { return [] }
+        let app = AXUIElementCreateApplication(pid)
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return [] }
+        return windows.compactMap { w in copyString(w, kAXTitleAttribute).map { (w, $0) } }
+    }
+
+    /// Bring one specific window to the front and activate its owning app. Best-effort: AX action
+    /// failures are silently ignored (mirrors every other jump path in this codebase — a failed focus is
+    /// a no-op, never a crash or a visible error).
+    static func raiseWindow(_ window: AXUIElement, appPid: pid_t) {
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        if let app = NSRunningApplication(processIdentifier: appPid) {
+            if #available(macOS 14.0, *) { app.activate() }
+            else { app.activate(options: [.activateIgnoringOtherApps]) }
+        }
+    }
+
     // MARK: - Accessibility reads
 
     private static func copyElement(_ el: AXUIElement, _ attr: String) -> AXUIElement? {

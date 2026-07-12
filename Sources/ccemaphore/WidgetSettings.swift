@@ -56,6 +56,12 @@ final class WidgetSettings: ObservableObject {
         var id: String { rawValue }
     }
 
+    /// Lamp layout: the classic vertical stack, or a horizontal row.
+    enum Orientation: String, CaseIterable, Identifiable {
+        case vertical, horizontal
+        var id: String { rawValue }
+    }
+
     @Published var visible: Bool { didSet { d.set(visible, forKey: K.visible) } }
     /// Collapsed-widget opacity (0.25–1.0). Forced to 1.0 by the views while the ribbon/panel is open.
     @Published var opacity: Double { didSet { d.set(opacity, forKey: K.opacity) } }
@@ -63,6 +69,8 @@ final class WidgetSettings: ObservableObject {
     /// When pinned the light can't be dragged (§8) — guards against nudging it by accident.
     @Published var pinned: Bool { didSet { d.set(pinned, forKey: K.pinned) } }
     @Published var displayMode: DisplayMode { didSet { d.set(displayMode.rawValue, forKey: K.displayMode) } }
+    /// Lamp layout: vertical stack (default) or horizontal row (§8).
+    @Published var orientation: Orientation { didSet { d.set(orientation.rawValue, forKey: K.orientation) } }
     /// Watch the Cursor / VS Code Claude Code extension log to drop a permission ribbon the instant the
     /// user answers in the IDE's OWN dialog (instead of at tool completion — for a long build that's
     /// minutes of stale red after the approval; see memory/permission-stale-ribbon-incident). ON by
@@ -72,7 +80,9 @@ final class WidgetSettings: ObservableObject {
     @Published var watchIDELog: Bool { didSet { d.set(watchIDELog, forKey: K.watchIDELog) } }
 
     private let d = UserDefaults.standard
-    /// displayId → stored origin (bottom-left, in that screen's local coordinates).
+    /// displayId → stored origin. This is `panel.frame.origin`, i.e. an ABSOLUTE global-coordinate
+    /// point (not screen-local) — the controller never subtracts the screen's own origin before
+    /// saving/restoring it. Keyed per-display purely so each monitor remembers its own spot.
     private var positions: [String: CGPoint]
 
     private enum K {
@@ -81,7 +91,9 @@ final class WidgetSettings: ObservableObject {
         static let size = "widget.size"
         static let pinned = "widget.pinned"
         static let displayMode = "widget.displayMode"
+        static let orientation = "widget.orientation"
         static let positions = "widget.positions"
+        static let lastDisplayID = "widget.lastDisplayID"
         static let watchIDELog = "widget.watchIDELog"
     }
 
@@ -94,11 +106,18 @@ final class WidgetSettings: ObservableObject {
         size = WidgetSize.stored(d.string(forKey: K.size)) ?? .m
         pinned = d.bool(forKey: K.pinned)
         displayMode = DisplayMode(rawValue: d.string(forKey: K.displayMode) ?? "") ?? .summary
+        orientation = Orientation(rawValue: d.string(forKey: K.orientation) ?? "") ?? .vertical
         watchIDELog = d.object(forKey: K.watchIDELog) as? Bool ?? true   // default ON (see doc above)
         positions = Self.decodePositions(d.data(forKey: K.positions))
+        lastDisplayID = d.string(forKey: K.lastDisplayID)
     }
 
     // MARK: - Per-display position
+
+    /// The display the widget was last placed on — so `restorePosition` can find the RIGHT saved
+    /// spot at cold launch, when the panel hasn't been placed on any screen yet and `panel.screen`
+    /// can't be trusted to reflect where the user actually left it (see FloatingWidgetController).
+    @Published var lastDisplayID: String? { didSet { d.set(lastDisplayID, forKey: K.lastDisplayID) } }
 
     func position(forDisplay id: String) -> CGPoint? { positions[id] }
 

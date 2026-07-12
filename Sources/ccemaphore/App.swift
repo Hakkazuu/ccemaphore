@@ -6,6 +6,12 @@ import SwiftUI
 @main
 enum Entry {
     static func main() {
+        // Writing to an ssh stdin whose reader has already closed (a host that dropped mid-write) delivers
+        // SIGPIPE, which by default kills the whole process — and RemoteExec.writeFile is reached from
+        // ordinary user actions (remote Allow/Deny relay, "Install hooks"). Ignore it process-wide so the
+        // failed write surfaces as a catchable EPIPE instead of a crash. Set here because Entry.main is the
+        // single entry for BOTH the GUI and every headless --remote-* CLI path.
+        signal(SIGPIPE, SIG_IGN)
         let args = CommandLine.arguments
 
         // Hook invocation: `ccemaphore --hook <event>` — read stdin, write status, exit (no GUI).
@@ -69,6 +75,72 @@ enum Entry {
         }
         if args.contains("--trusted-dump") {
             TrustedCommands.dump()
+            return
+        }
+        if args.contains("--remote-hosts-dump") {
+            RemoteHosts.dump()
+            return
+        }
+        if let i = args.firstIndex(of: "--remote-ping"), i + 1 < args.count {
+            guard let host = RemoteHosts.resolve(args[i + 1]) else { print("no such remote host: \(args[i + 1])"); return }
+            switch RemoteExec.testConnection(host) {
+            case .success(let platform): print("\(host.label) (\(host.hostname)): reachable, platform=\(platform)")
+            case .failure(let e): print("\(host.label) (\(host.hostname)): FAILED — \(e.message)")
+            }
+            return
+        }
+        if let i = args.firstIndex(of: "--remote-scan"), i + 1 < args.count {
+            guard let host = RemoteHosts.resolve(args[i + 1]) else { print("no such remote host: \(args[i + 1])"); return }
+            Task { @MainActor in
+                // A throwaway instance (pollOnce is now an instance method holding the F1 parse cache — a
+                // one-shot scan gets no cache benefit, which is fine for the diagnostic).
+                let poller = RemoteTranscriptPoller()
+                switch await poller.pollOnce(host: host) {
+                case .success(let result):
+                    // Mode-A sessions (state here is the transcript-only dot; the app merges the status
+                    // rows below in render() — printed separately so the diagnostic shows both layers).
+                    let now = Date()
+                    for s in result.sessions {
+                        let ageSec = Int(now.timeIntervalSince(s.lastActivity))
+                        print("\(s.dot) \(s.project)  \(s.gitBranch ?? "")  age=\(ageSec)s  lastActivity=\(s.lastActivity)  id=\(s.id)")
+                    }
+                    if result.sessions.isEmpty { print("(no sessions found)") }
+                    for (id, st) in result.statuses.sorted(by: { $0.key < $1.key }) {
+                        print("  status \(st.state.rawValue)/\(st.lastEvent ?? "?")  id=\(id)")
+                    }
+                case .failure(let e): print("scan failed: \(e.message)")
+                }
+                exit(0)
+            }
+            dispatchMain()
+        }
+        if let i = args.firstIndex(of: "--remote-status-dump"), i + 1 < args.count {
+            guard let host = RemoteHosts.resolve(args[i + 1]) else { print("no such remote host: \(args[i + 1])"); return }
+            do {
+                let names = try RemoteExec.listGlob(host, glob: "~/.claude/status/*.json")
+                for name in names {
+                    guard let data = try RemoteExec.readFile(host, path: name), let e = StatusReader.parse(data: data) else { continue }
+                    print("\(e.state.rawValue)  \(e.project)  id=\(e.id.prefix(8))  event=\(e.lastEvent ?? "?")")
+                }
+                if names.isEmpty { print("(no status files)") }
+            } catch { print("status dump failed: \(error.localizedDescription)") }
+            return
+        }
+        if let i = args.firstIndex(of: "--remote-hooks-status"), i + 1 < args.count {
+            guard let host = RemoteHosts.resolve(args[i + 1]) else { print("no such remote host: \(args[i + 1])"); return }
+            print("installed: \(RemoteHooksInstaller.isInstalled(host))  (\(host.label) — \(RemoteHooksInstaller.remoteSettingsPath))")
+            return
+        }
+        if let i = args.firstIndex(of: "--remote-install-hooks"), i + 1 < args.count {
+            guard let host = RemoteHosts.resolve(args[i + 1]) else { print("no such remote host: \(args[i + 1])"); return }
+            do { try RemoteHooksInstaller.install(host); print("remote hooks installed on \(host.label)") }
+            catch { print("install failed: \(error.localizedDescription)") }
+            return
+        }
+        if let i = args.firstIndex(of: "--remote-uninstall-hooks"), i + 1 < args.count {
+            guard let host = RemoteHosts.resolve(args[i + 1]) else { print("no such remote host: \(args[i + 1])"); return }
+            do { try RemoteHooksInstaller.uninstall(host); print("remote hooks removed from \(host.label)") }
+            catch { print("uninstall failed: \(error.localizedDescription)") }
             return
         }
         if let i = args.firstIndex(of: "--ide-log-probe") {
@@ -136,31 +208,31 @@ enum Entry {
           ccemaphore --uninstall-hooks      Remove everything ccemaphore added.
           ccemaphore --hooks-status         Report whether the hooks are installed.
 
+        Remote hosts (SSH — configured from the in-app "Remote Hosts" section; <host> is an id or label):
+          ccemaphore --remote-hosts-dump           Print the configured remote host list.
+          ccemaphore --remote-ping <host>          Test connectivity + detect platform (uname -s).
+          ccemaphore --remote-scan <host>          One-shot session scan over SSH, then exit.
+          ccemaphore --remote-status-dump <host>   Print the host's mode-B hook status files.
+          ccemaphore --remote-hooks-status <host>  Report whether remote hooks are installed.
+          ccemaphore --remote-install-hooks <host>    Deploy the hook shim + install remote hooks.
+          ccemaphore --remote-uninstall-hooks <host>  Remove everything ccemaphore added remotely.
+
         Internal (invoked by Claude Code, not by hand):
           ccemaphore --hook <event>         Handle a hook event from stdin.
         """)
     }
 }
 
-/// The menu-bar item is now minimal (§11): it keeps the colored status glyph, but clicking it offers
-/// only "show the light" + "quit" — every other surface moved into the floating widget. The widget
-/// itself (and the history window) is managed in AppKit (`FloatingWidgetController`).
+/// The menu-bar item (v3, `StatusItemController` — a manual `NSStatusItem`, not SwiftUI's
+/// `MenuBarExtra`): right-click PINS the management panel open, left-click shows "show the light" +
+/// "open panel" + "quit" — every other surface lives in the floating widget. No SwiftUI `Scene` is
+/// needed for the status item itself; `Settings {}` is a required-but-invisible placeholder scene so
+/// this stays a valid SwiftUI `App` with zero windows of its own (the floating widget / history window
+/// are both managed directly in AppKit via `FloatingWidgetController`/`HistoryWindowController`).
 struct CcemaphoreApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var engine = StateEngine.shared
-    @ObservedObject private var settings = WidgetSettings.shared
-    @ObservedObject private var loc = LocalizationManager.shared
 
     var body: some Scene {
-        MenuBarExtra {
-            Toggle(isOn: $settings.visible) { Text(L("menubar.showLight")) }
-            Divider()
-            Button(L("menu.quit")) { NSApplication.shared.terminate(nil) }
-        } label: {
-            // Emoji keeps its color in the menu bar (SF Symbols render as monochrome templates),
-            // and the distinct glyphs double as the non-color accessibility cue.
-            Text(engine.menuBarText)
-        }
-        .menuBarExtraStyle(.menu)
+        Settings {}
     }
 }

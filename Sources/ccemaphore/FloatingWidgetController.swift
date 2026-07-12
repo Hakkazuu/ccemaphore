@@ -21,6 +21,14 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     private var lightPanel: LightPanel?
     private var expandedPanel: NSPanel?
     private var expanded = false
+    /// Set by `forceShowExpanded()` (the menu-bar "Open panel" escape hatch) so `hoverTick()` skips its
+    /// ribbon auto-collapse for this one open — cleared by `hideExpanded()`. See `forceShowExpanded`.
+    private var forcedOpen = false
+    /// Set by `togglePinnedPanel()` (right-click on the menu-bar status item — see `StatusItemController`)
+    /// to keep the panel open regardless of mouse position, until the SAME action closes it again. Unlike
+    /// `forcedOpen`, this bypasses `hoverTick()` ENTIRELY (checked first, before the ribbon-preemption
+    /// guard OR the mouse-leave collapse timer) — a true pin, not just a one-shot escape hatch.
+    private(set) var pinnedOpen = false
     private var cancellables = Set<AnyCancellable>()
     /// Guards `windowDidResize`/`windowDidMove` re-entrancy while WE are setting the frame.
     private var adjustingFrame = false
@@ -45,12 +53,22 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     private let ghostGrace: TimeInterval = 0.7
     private let ghostRebuildCooldown: TimeInterval = 2.0
     /// Remembered anchor edges so a content resize (ribbon appears, or size preset changes) re-pins the
-    /// tower in place instead of growing from the bottom-left: the vertical CENTER stays put (the ribbon
-    /// extends symmetrically from the light's middle, §6) and the tower's docked horizontal edge stays.
-    /// Captured on the last move — NOT updated on resize — so toggling the ribbon returns to the same spot.
+    /// tower in place instead of growing from the bottom-left. Horizontally the tower's docked edge stays
+    /// (`savedRight`/`savedLeft`). Vertically the ribbon CENTRES on the tower when there's room both ways
+    /// (`savedCenterY`), but near a screen edge it grows AWAY from that edge (`savedBottom`/`savedTop`)
+    /// so the tower stays pinned and the body never clips — `savedVerticalMode` records which, and both
+    /// the view (`towerVerticalAlignment`) and the window pinning (`windowDidResize`) read it so they
+    /// can't disagree. Captured on the last move — NOT on resize — so toggling the ribbon returns to the
+    /// same spot. See `windowDidResize`.
     private var savedCenterY: CGFloat?
     private var savedRight: CGFloat?
     private var savedLeft: CGFloat?
+    private var savedBottom: CGFloat?
+    private var savedTop: CGFloat?
+    /// Centred on the light, or grown up (`.bottom`, light near the bottom edge) / down (`.top`, near the
+    /// top). Decided in `captureAnchors` from the bare tower's resting position.
+    private enum VerticalMode { case center, top, bottom }
+    private var savedVerticalMode: VerticalMode = .center
 
     /// New-alert detector + sound: the ribbon at the light IS the notification now (toasts are gone), so
     /// a newly-appearing request / question / completion chimes with our bundled alert sound. `alertedIds`
@@ -112,12 +130,20 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     }
 
     private func recoverHover(_ why: String, rearmTimer: Bool) {
-        if expanded { hideExpanded() }       // drop any stale expansion so hover re-opens cleanly
+        // Drop a stale HOVER expansion so hover re-opens cleanly — but a pinned (menu-bar right-click) or
+        // force-opened panel must SURVIVE a Space switch / screen change / wake, not silently close-and-
+        // unpin (hideExpanded clears both flags). Only collapse a plain hover expansion here (V18).
+        if expanded, !pinnedOpen, !forcedOpen { hideExpanded() }
         if rearmTimer { startHoverTracking() }   // the run loop can drop the timer across sleep
         if let panel = lightPanel, let screen = panel.screen ?? NSScreen.main {
             if settings.visible, !panel.isVisible { panel.orderFrontRegardless() }
             adjustingFrame = true
-            panel.setFrameOrigin(clamp(origin: panel.frame.origin, size: panel.frame.size, into: screen.visibleFrame))
+            // Full screen bounds, not `visibleFrame` — a Space switch fires this on EVERY desktop
+            // change, so clamping into the Dock-excluding `visibleFrame` here would yank a
+            // deliberately Dock-level placement back above the Dock on every single switch. This
+            // still catches a truly off-screen origin (e.g. after a monitor disconnect shrinks the
+            // display) without fighting where the user actually put it.
+            panel.setFrameOrigin(clamp(origin: panel.frame.origin, size: panel.frame.size, into: screen.frame, visibleFrame: screen.visibleFrame))
             adjustingFrame = false
             captureAnchors(panel)
         }
@@ -188,8 +214,10 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         // The ribbon at the visible light is where the user answers a permission request, so the broker
         // treats "widget visible" as "user is reachable now" (→ a real wait window).
         engine.setWidgetVisible(settings.visible)
-        // The ribbon owns the light — never overlap it with the hover panel.
-        if hasRibbon, expanded { hideExpanded() }
+        // The ribbon owns the light — never overlap it with the hover panel (unless the user explicitly
+        // force-opened it via the menu-bar "Open panel" item, or pinned it open — see `forceShowExpanded`
+        // / `togglePinnedPanel`).
+        if hasRibbon, expanded, !forcedOpen, !pinnedOpen { hideExpanded() }
         // The ribbon IS the notification now: chime when a genuinely NEW live request, question, or
         // completion appears. An id that merely flickered out and back within `alertReChimeCooldown`
         // (a transient state flap, or the pre-fix-3a click round-trip) is NOT re-chimed; a continuously
@@ -246,8 +274,13 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
 
     private func hoverTick() {
         guard let light = lightPanel, light.isVisible, settings.visible else { return }
-        // While the ribbon is on screen it owns the light — suppress the hover panel.
-        if hasRibbon {
+        // Pinned open (menu-bar right-click) bypasses hover entirely — no ribbon-preemption check, no
+        // mouse-leave collapse timer. Only `togglePinnedPanel()` closes it.
+        if pinnedOpen { return }
+        // While the ribbon is on screen it owns the light — suppress the hover panel. Skipped when the
+        // user explicitly force-opened it (menu-bar "Open panel"): normal mouse-leaves-the-panel
+        // collapse still applies below, just not this auto-collapse-because-a-request-arrived path.
+        if hasRibbon, !forcedOpen {
             if expanded { hideExpanded() }
             return
         }
@@ -360,6 +393,34 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         Log.watcher.warn("hover panel rebuilt (ghost window: isVisible without occlusion .visible)")
     }
 
+    /// Force-open the management panel regardless of ribbon/hover state. `hoverTick()`'s `hasRibbon`
+    /// guard deliberately yields the light to the permission ribbon (see its doc comment) — which also
+    /// means hover can't open the panel AT ALL while a request is pending, with no other way in. This
+    /// is the escape hatch: wired to the always-available menu-bar dropdown item (`CcemaphoreApp`, not
+    /// gated by the ribbon), so Настройки/История/Обновить/Выход stay reachable even when red.
+    /// `forcedOpen` tells `hoverTick()` to skip its ribbon auto-collapse for THIS open — normal
+    /// mouse-leaves-the-panel collapse still applies, and any panel action (or the ribbon getting a NEW
+    /// event) that calls `hideExpanded()` clears the flag.
+    func forceShowExpanded() {
+        guard lightPanel != nil, settings.visible else { return }
+        forcedOpen = true
+        if !expanded { showExpanded() }
+    }
+
+    /// Right-click on the menu-bar status item (`StatusItemController`) — open the panel and PIN it open
+    /// (no hover-based auto-collapse at all, see the `pinnedOpen` guard at the top of `hoverTick()`), or
+    /// if it's already pinned, unpin and close it. This is the "stays open until clicked again" behavior
+    /// requested for the menu-bar icon, distinct from `forceShowExpanded`'s one-shot escape hatch.
+    func togglePinnedPanel() {
+        guard lightPanel != nil, settings.visible else { return }
+        if pinnedOpen {
+            hideExpanded()
+        } else {
+            pinnedOpen = true
+            if !expanded { showExpanded() }
+        }
+    }
+
     /// Hide the management panel (hover left, or a panel action asked to close). Public alias for the
     /// panel's own ▾ button. Never re-enters `applyWindowState` (that recursed in v1).
     func hideExpanded() {
@@ -368,6 +429,8 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         expandedSince = nil
         insideSince = nil
         outsideSince = nil
+        forcedOpen = false
+        pinnedOpen = false
         expandedPanel?.orderOut(nil)
         updateLightOpacity()
         if wasExpanded { Log.watcher.debug("hover collapse") }
@@ -397,11 +460,25 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         return n.map { "\($0.uint32Value)" } ?? "main"
     }
 
+    /// At cold launch the panel has never been placed on any screen, so `panel.screen` resolves to
+    /// whatever display contains its default (0,0) origin — NOT necessarily the monitor the user
+    /// last had it on. Resolve the target screen from the remembered `lastDisplayID` FIRST; only
+    /// fall back to `panel.screen ?? NSScreen.main` (today's pre-fix behavior) if that display is
+    /// unrecorded (upgrading users) or no longer connected (e.g. an external monitor unplugged).
     private func restorePosition(_ panel: NSPanel) {
+        if let lastID = settings.lastDisplayID,
+           let targetScreen = NSScreen.screens.first(where: { displayID($0) == lastID }),
+           let saved = settings.position(forDisplay: lastID) {
+            adjustingFrame = true
+            panel.setFrameOrigin(clamp(origin: saved, size: panel.frame.size, into: targetScreen.frame, visibleFrame: targetScreen.visibleFrame))
+            adjustingFrame = false
+            captureAnchors(panel)
+            return
+        }
         guard let screen = panel.screen ?? NSScreen.main else { return }
         if let saved = settings.position(forDisplay: displayID(screen)) {
             adjustingFrame = true
-            panel.setFrameOrigin(clamp(origin: saved, size: panel.frame.size, into: screen.visibleFrame))
+            panel.setFrameOrigin(clamp(origin: saved, size: panel.frame.size, into: screen.frame, visibleFrame: screen.visibleFrame))
             adjustingFrame = false
         } else {
             let vis = screen.visibleFrame
@@ -416,14 +493,50 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     /// frame. Whichever edge the tower is docked to equals the window edge (the tower is always at the
     /// docked end + vertically centred), so these stay correct regardless of the ribbon's width.
     private func captureAnchors(_ panel: NSPanel) {
+        // Only the bare tower's edges are valid anchors. While a ribbon is on screen the frame includes
+        // the ribbon body, so maxX/minX/maxY/minY would capture the BODY's edges, not the tower's — pin
+        // to those on the next resize and the tower teleports. Skip and keep the last good (tower-only)
+        // anchors; every real caller here (restorePosition / windowDidMove / recoverHover) runs without a
+        // ribbon anyway, so this is a safety net (V17).
+        guard !hasRibbon else { return }
         savedCenterY = panel.frame.midY
         savedRight = panel.frame.maxX
         savedLeft = panel.frame.minX
+        savedBottom = panel.frame.minY
+        savedTop = panel.frame.maxY
+        if let screen = panel.screen {
+            // Centre the ribbon on the light when it fits both ways; near a vertical edge, grow away from
+            // it (so a light parked at the bottom-right corner opens its dialog UP-and-toward-centre, with
+            // the light itself staying put, rather than being shoved inward to make room). `room` ≈ half a
+            // tall ribbon; the `windowDidResize` clamp is the backstop for a ribbon taller than the room.
+            let vf = screen.visibleFrame
+            let cy = panel.frame.midY
+            let room: CGFloat = 80 * settings.size.scale
+            if cy - room < vf.minY      { savedVerticalMode = .bottom }   // near bottom → grow up
+            else if cy + room > vf.maxY { savedVerticalMode = .top }      // near top → grow down
+            else                        { savedVerticalMode = .center }   // room both ways → centre on light
+        }
     }
 
-    private func clamp(origin: CGPoint, size: CGSize, into vis: CGRect) -> CGPoint {
-        CGPoint(x: min(max(vis.minX + 6, origin.x), vis.maxX - size.width - 6),
-                y: min(max(vis.minY + 6, origin.y), vis.maxY - size.height - 6))
+    /// The single criterion for "the tower sits on the right half of its screen" — shared by
+    /// `windowDidResize`'s frame pinning and the ribbon view's `ribbonExtendsLeftward`, so the two can
+    /// never disagree about which way the ribbon grows. Uses `visibleFrame.midX`: with no side Dock this
+    /// equals `frame.midX`, so it only changes the previously-inconsistent side-Dock case (V13).
+    private func towerOnRightHalf(_ panel: NSPanel) -> Bool {
+        guard let screen = panel.screen ?? NSScreen.main else { return true }
+        return panel.frame.midX >= screen.visibleFrame.midX
+    }
+
+    private func clamp(origin: CGPoint, size: CGSize, into screenFrame: CGRect, visibleFrame: CGRect) -> CGPoint {
+        // Keep the window fully on-screen, but allow it FLUSH against an edge (NO inset). A hard inset here
+        // fought the user parking the light at the very edge: `recoverHover` re-applied it on every Space
+        // switch, nudging a flush light inward each time (the "drifts off the edge" bug). The panel already
+        // carries `glowMargin` padding, so a flush panel still shows a visual gap. X + bottom bound to the
+        // FULL screen frame (Dock-level parking survives); the TOP additionally excludes the menu bar
+        // (visibleFrame.maxY) so the widget can't hide under it.
+        let maxTop = min(screenFrame.maxY, visibleFrame.maxY)
+        return CGPoint(x: min(max(screenFrame.minX, origin.x), screenFrame.maxX - size.width),
+                       y: min(max(screenFrame.minY, origin.y), maxTop - size.height))
     }
 
     // MARK: - NSWindowDelegate
@@ -431,33 +544,50 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     func windowDidMove(_ notification: Notification) {
         guard !adjustingFrame, let panel = lightPanel, panel === notification.object as? NSWindow,
               let screen = panel.screen else { return }
-        settings.setPosition(panel.frame.origin, forDisplay: displayID(screen))
+        let id = displayID(screen)
+        settings.setPosition(panel.frame.origin, forDisplay: id)
+        settings.lastDisplayID = id
         captureAnchors(panel)
         if expanded { positionExpandedPanel() }
     }
 
     func windowDidResize(_ notification: Notification) {
         // The content resizes when the ribbon appears/disappears or the size preset (S/M/L) changes.
-        // Re-pin so the tower stays put: keep the vertical CENTRE (ribbon grows from the light's middle)
-        // and the tower's docked horizontal edge — docked right → grow left, docked left → grow right —
-        // then clamp on-screen. Anchors come from the last move (not updated here), so toggling the
-        // ribbon returns to the exact same spot.
+        // VERTICAL (`savedVerticalMode`, decided in `captureAnchors`): `.center` pins the captured
+        // centre-line so the frame grows symmetrically and the dialog sits centred on the light; `.bottom`
+        // pins the light's bottom (`savedBottom`) and grows UP; `.top` pins the light's top and grows
+        // DOWN — so a light at a screen edge keeps the light put and grows the body toward the room. The
+        // light itself never moves (no "jumps up" re-centre bug). HORIZONTAL: the tower sits at the frame's
+        // DOCKED edge, so pinning `savedRight`/`savedLeft` keeps it fixed as the body grows to the free side.
         guard !adjustingFrame, let panel = lightPanel, panel === notification.object as? NSWindow,
               let screen = panel.screen else { return }
-        let vis = screen.visibleFrame
         let f = panel.frame
-        let towerOnRight = f.midX >= vis.midX
+        // The SAME tower-side criterion the ribbon view uses (`ribbonExtendsLeftward` → `towerOnRightHalf`)
+        // so the window pinning and the ribbon's grow direction can never disagree. The sideways "light
+        // jumps aside" with a side Dock came from this using `screen.frame.midX` while the view used
+        // `visibleFrame.midX` (V13); unified now.
+        let towerOnRight = towerOnRightHalf(panel)
         var origin = f.origin
-        origin.y = (savedCenterY ?? f.midY) - f.height / 2
+        switch savedVerticalMode {
+        case .center: if let cy = savedCenterY { origin.y = cy - f.height / 2 }   // midY fixed → grows both ways
+        case .bottom: if let b = savedBottom  { origin.y = b }                    // light bottom pinned → grows up
+        case .top:    if let t = savedTop     { origin.y = t - f.height }         // light top pinned → grows down
+        }
         if towerOnRight {
             if let r = savedRight { origin.x = r - f.width }
         } else {
             if let l = savedLeft { origin.x = l }
         }
-        let clamped = clamp(origin: origin, size: f.size, into: vis)
-        if clamped != f.origin {
+        // Backstop clamp so a ribbon TALLER than the room can't push the body off-screen — NO edge inset
+        // (flush allowed, matching `clamp`), so a light parked flush at an edge isn't nudged when the
+        // ribbon toggles. X uses the full screen frame (Dock-level parking survives); Y excludes the menu
+        // bar (visibleFrame). For a normal-height ribbon the vertical mode already keeps it on-screen, so
+        // this only ever bites the pathological too-tall case.
+        origin.x = min(max(screen.frame.minX, origin.x), screen.frame.maxX - f.width)
+        origin.y = min(max(screen.visibleFrame.minY, origin.y), screen.visibleFrame.maxY - f.height)
+        if origin != f.origin {
             adjustingFrame = true
-            panel.setFrameOrigin(clamped)
+            panel.setFrameOrigin(origin)
             adjustingFrame = false
         }
         panel.invalidateShadow()   // window resized (ribbon toggled / size preset) → refresh native shadow
@@ -467,13 +597,16 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
 
 // MARK: - Light panel subclass
 
-/// Borderless non-activating panel that can still become key when a control genuinely needs it. Clicks
-/// on the light are intentionally inert (the management panel opens on HOVER, not click); a right-click
-/// is swallowed so it can't surface a stray menu.
+/// Borderless non-activating panel that can still become key when a control genuinely needs it. A plain
+/// (left) click on the light is intentionally inert (the management panel opens on HOVER, not click);
+/// a RIGHT-click force-opens the management panel — the same escape hatch as the menu-bar "Открыть
+/// панель" item, just reachable at the light itself instead of only from the menu bar.
 final class LightPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
-    override func rightMouseDown(with event: NSEvent) { /* intentionally inert */ }
+    override func rightMouseDown(with event: NSEvent) {
+        FloatingWidgetController.shared.forceShowExpanded()
+    }
 }
 
 /// The hover management panel. Borderless panels default `canBecomeKey` to false, which starves the
@@ -509,17 +642,22 @@ struct LightRootView: View {
                        branch: session?.gitBranch ?? "",
                        command: req.detail ?? req.summary,
                        chatTitle: session?.title,
-                       host: h.host, hostBundleId: h.bundleId)
+                       host: h.host, hostBundleId: h.bundleId,
+                       remoteHostLabel: req.remoteHostId.flatMap { RemoteHosts.resolve($0)?.label },
+                       remoteHostId: req.remoteHostId)
         }
     }
     /// Chats parked on a native prompt / question the user answers in Cursor — the red attention items.
     private var attentionItems: [RibbonItem] {
         engine.attentionSessions.map { a in
             let h = engine.hostInfo(for: a.id)
+            let session = engine.sessions.first { $0.id == a.id }
             return RibbonItem(id: a.id, kind: .attention(a.kind), sessionId: a.id, cwd: a.cwd,
                        project: a.project, branch: a.branch, command: nil,
-                       chatTitle: engine.sessions.first { $0.id == a.id }?.title,
-                       host: h.host, hostBundleId: h.bundleId)
+                       chatTitle: session?.title,
+                       host: h.host, hostBundleId: h.bundleId,
+                       remoteHostLabel: session?.remoteHostId.flatMap { RemoteHosts.resolve($0)?.label },
+                       remoteHostId: session?.remoteHostId)
         }
     }
     /// Transient GREEN "chat finished" notices.
@@ -529,7 +667,7 @@ struct LightRootView: View {
             return RibbonItem(id: "done-\(n.id)", kind: .completed, sessionId: n.id, cwd: n.cwd,
                        project: n.project, branch: n.branch, command: nil,
                        chatTitle: engine.sessions.first { $0.id == n.id }?.title,
-                       host: h.host, hostBundleId: h.bundleId)
+                       host: h.host, hostBundleId: h.bundleId, completedAt: n.createdAt)
         }
     }
     /// Red (act-now) items — a live decision or a native-prompt attention. These ALONE pulse the tower;
@@ -552,17 +690,26 @@ struct LightRootView: View {
         FloatingWidgetController.shared.ribbonExtendsLeftward ? .right : .left
     }
 
+    /// Which edge the tower is vertically pinned to — mirrors `FloatingWidgetController.windowDidResize`
+    /// so a taller ribbon body always grows AWAY from the tower's docked edge (never re-centering or
+    /// overflowing off-screen; see the doc comment on `towerVerticalAlignment`).
+    private var verticalAlignment: VerticalAlignment {
+        FloatingWidgetController.shared.towerVerticalAlignment
+    }
+
     var body: some View {
         Group {
             if ribbonItems.isEmpty {
-                LightTowerView(input: light, scale: settings.size.scale)
+                LightTowerView(input: light, scale: settings.size.scale, orientation: settings.orientation)
             } else {
                 PermissionRibbonView(
                     items: ribbonItems,
                     index: clampedIndexBinding,
                     anchor: anchor,
+                    verticalAlignment: verticalAlignment,
                     light: light,
                     scale: settings.size.scale,
+                    orientation: settings.orientation,
                     onAllow: { decide($0, .allowOnce) },
                     onDeny: { decide($0, .deny) },
                     onAll: { decide($0, .allowAll) },
@@ -592,7 +739,8 @@ struct LightRootView: View {
     /// decision here: the user answers in Cursor's own dialog, and the broker's external-resolution
     /// detection then drops the request — so the ribbon stays truthful (red) until it's actually answered.
     private func openChat(_ r: RibbonItem) {
-        DeepLinker.focus(sessionId: r.sessionId, cwd: r.cwd, host: r.host, hostBundleId: r.hostBundleId)
+        DeepLinker.focus(sessionId: r.sessionId, cwd: r.cwd, host: r.host, hostBundleId: r.hostBundleId,
+                         remoteHostId: r.remoteHostId)
         // A completion notice is informational; jumping to it clears it (it also auto-expires).
         if r.isCompleted { engine.dismissCompletion(r.sessionId) }
     }
@@ -606,7 +754,18 @@ extension FloatingWidgetController {
     /// screen, so the body grows into the free space toward the centre. Uses the same screen +
     /// midX criterion as `windowDidResize`, keeping the view and the window pinning in agreement.
     var ribbonExtendsLeftward: Bool {
-        guard let panel = lightPanel, let screen = panel.screen ?? NSScreen.main else { return true }
-        return panel.frame.midX >= screen.visibleFrame.midX
+        guard let panel = lightPanel else { return true }
+        return towerOnRightHalf(panel)
+    }
+
+    /// How the ribbon body aligns on the tower vertically — mirrors `windowDidResize`'s `savedVerticalMode`
+    /// pinning so the SwiftUI side and the window side agree. Centred on the light when it fits; grown away
+    /// from a near screen edge (`.top`/`.bottom`) otherwise, keeping the light pinned and the body on-screen.
+    var towerVerticalAlignment: VerticalAlignment {
+        switch savedVerticalMode {
+        case .center: return .center
+        case .top:    return .top
+        case .bottom: return .bottom
+        }
     }
 }

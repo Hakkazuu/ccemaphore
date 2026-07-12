@@ -1,5 +1,34 @@
 import SwiftUI
 
+/// Single shared ISO-8601 parser — fractional seconds first, then plain, matching what the hook handler
+/// writes. `Date.ISO8601FormatStyle` is a Sendable value type, safe to share/parse concurrently with no
+/// lock. Consolidates several hand-rolled copies of this exact frac-then-plain ladder (R5). NOTE: the
+/// `ISO8601DateFormatter`-based parsers (`SessionStore`, `Log`, `Diagnostic`) are deliberately NOT folded
+/// in — that reference type carries different `formatOptions` semantics, and conflating the two is the
+/// very hazard this consolidation is careful to avoid.
+enum ISOTime {
+    static let frac = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    static let plain = Date.ISO8601FormatStyle()
+    static func parse(_ s: String) -> Date? { (try? frac.parse(s)) ?? (try? plain.parse(s)) }
+}
+
+/// A settings segment button (size S/M/L, display mode, orientation) — the shared style extracted from
+/// three byte-identical copies in `WidgetQuickSettings` (R6). `mono` uses a monospaced glyph (the size
+/// segment's S/M/L letters); default proportional for word labels. Pixel-identical to the originals.
+@ViewBuilder
+func segmentPill(_ label: String, active: Bool, mono: Bool = false, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+        Text(label)
+            .font(.system(size: 10, weight: .semibold, design: mono ? .monospaced : .default))
+            .foregroundStyle(active ? DS.textPrimary : DS.textSecondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .background(active ? DS.neutralBtnHover : DS.neutralBtn, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+}
+
 extension SessionState {
     var color: Color {
         switch self {

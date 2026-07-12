@@ -28,6 +28,15 @@ struct RibbonItem: Identifiable, Equatable {
     /// keep older call sites compiling; the builders fill them from `StateEngine.hostInfo`.
     var host: SessionHost = .unknown
     var hostBundleId: String? = nil
+    /// Non-nil ⇒ this item is for a session on a remote host (its `RemoteHost.label`) — shown as a small
+    /// pill next to the project name so the user can tell a remote request apart from a local one.
+    var remoteHostLabel: String? = nil
+    /// The `RemoteHost.id` this item's session came from, if remote — lets `onOpenChat` route to
+    /// `DeepLinker`'s remote (VS Code Remote-SSH deep-link) path instead of the local Cursor/terminal one.
+    var remoteHostId: String? = nil
+    /// When the completion notice was minted (`CompletionNotice.createdAt`) — drives the countdown bar at
+    /// the bottom edge of a `.completed` item. Completions only; nil for decision/attention items.
+    var completedAt: Date? = nil
 
     var isDecision: Bool { if case .decision = kind { return true } else { return false } }
     var isCompleted: Bool { if case .completed = kind { return true } else { return false } }
@@ -46,9 +55,16 @@ struct PermissionRibbonView: View {
     let items: [RibbonItem]
     @Binding var index: Int
     let anchor: RibbonAnchor
+    /// Which edge the (shorter) tower aligns to within the row — matches whichever screen edge it's
+    /// docked to (`FloatingWidgetController.towerVerticalAlignment`), so a taller ribbon body grows
+    /// AWAY from the tower instead of re-centering the frame (which would move the tower) or growing
+    /// past the physical screen edge (where it'd become invisible/unreachable).
+    var verticalAlignment: VerticalAlignment = .center
     /// The tower the ribbon docks to (red lamp shows the pending count).
     let light: LightInput
     var scale: CGFloat = 1
+    /// Lamp layout of the docked tower (§8's orientation setting) — threaded straight through to it.
+    var orientation: WidgetSettings.Orientation = .vertical
     /// Decisions for the currently-shown request.
     var onAllow: (RibbonItem) -> Void
     var onDeny: (RibbonItem) -> Void
@@ -68,7 +84,7 @@ struct PermissionRibbonView: View {
         // The tower must render ON TOP of the overlap (higher z). We order body→tower (right) or
         // tower→body (left) in an HStack with a negative spacing so the body's inner edge slides
         // under the tower; `zIndex` keeps the tower painted last so the seam stays hidden.
-        HStack(spacing: -overlap) {
+        HStack(alignment: verticalAlignment, spacing: -overlap) {
             if anchor == .right {
                 bodyIfPresent
                 tower
@@ -80,7 +96,7 @@ struct PermissionRibbonView: View {
     }
 
     private var tower: some View {
-        LightTowerView(input: light, scale: scale).zIndex(2)
+        LightTowerView(input: light, scale: scale, orientation: orientation).zIndex(2)
     }
 
     @ViewBuilder private var bodyIfPresent: some View {
@@ -128,6 +144,15 @@ struct PermissionRibbonView: View {
         .background(
             RoundedRectangle(cornerRadius: DS.Geo.ribbonRadius, style: .continuous)
                 .fill(DS.panelBG)
+                // Countdown bar flush along the very bottom edge of a completion notice — overlaid on the
+                // fill and clipped to the SAME rounded rect so its ends follow the bottom corners.
+                .overlay(alignment: .bottom) {
+                    if r.isCompleted, let created = r.completedAt {
+                        CompletionTimerBar(createdAt: created, duration: Tuning.doneNoticeWindow, color: DS.green)
+                            .id(r.id)   // restart the countdown per notice (navigator paging / new episode)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: DS.Geo.ribbonRadius, style: .continuous))
         )
         .overlay(
             // 1px neutral border…
@@ -219,6 +244,15 @@ struct PermissionRibbonView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
+            if let label = r.remoteHostLabel {
+                Text(Lf("remote.badge.host", label))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(DS.textSecondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(DS.neutralBtn, in: Capsule())
+                    .lineLimit(1)
+            }
         }
     }
 
@@ -302,6 +336,32 @@ struct PermissionRibbonView: View {
 }
 
 // MARK: - Subviews
+
+/// The thin timer bar along the bottom edge of a completion notice: a left-anchored line that shrinks its
+/// width to zero over the notice's lifetime (`Tuning.doneNoticeWindow`), so it visibly counts down to the
+/// auto-hide — its right edge receding to the left. Driven from the notice's `createdAt`, so it's accurate
+/// even if the ribbon is shown mid-life (e.g. paged to via the navigator) rather than always from full.
+private struct CompletionTimerBar: View {
+    let createdAt: Date
+    let duration: TimeInterval
+    let color: Color
+    @State private var fraction: CGFloat = 1
+
+    var body: some View {
+        GeometryReader { geo in
+            color
+                .frame(width: max(0, geo.size.width * fraction))
+                .frame(maxWidth: .infinity, alignment: .leading)   // shrink from the right → recede left
+        }
+        .frame(height: 2.5)
+        .onAppear {
+            let elapsed = Date().timeIntervalSince(createdAt)
+            fraction = CGFloat(max(0, min(1, 1 - elapsed / duration)))   // where the countdown is right now
+            let remaining = max(0, duration - elapsed)
+            withAnimation(.linear(duration: remaining)) { fraction = 0 }
+        }
+    }
+}
 
 /// Square ‹/› navigator button. Hover lightens its neutral fill (mirrors the mockup `style-hover`).
 private struct NavButton: View {

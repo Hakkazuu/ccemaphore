@@ -32,6 +32,21 @@ final class StateEngine: ObservableObject {
     /// User-curated commands the permission hook auto-approves (no dialog, no ribbon). Surfaced + edited
     /// in Настройки; the hook reads the backing `trusted.json` directly on each call. See `TrustedCommands`.
     @Published private(set) var trustedCommands: [TrustedCommands.Entry] = []
+    /// Per-host connection status for the "Remote Hosts" UI (connected/error/last-seen). Keyed by
+    /// `RemoteHost.id`. Populated by `remotePoller`'s poll loop — see `Tuning.remotePollInterval`.
+    @Published private(set) var remoteHostStatuses: [String: RemoteTranscriptPoller.HostStatus] = [:]
+    /// The configured remote host list, for the "Remote Hosts" settings section — reloaded after every
+    /// CRUD op so the UI (a plain value list, not a live file watch) stays in sync with `remote_hosts.json`.
+    @Published private(set) var remoteHosts: [RemoteHost] = []
+    /// Per-host "Test Connection" outcome, keyed by `RemoteHost.id` — transient UI feedback, not persisted.
+    @Published private(set) var remoteTestResults: [String: Result<String, RemoteExec.SSHError>] = [:]
+    /// Outcome of an async remote hook install, in a Sendable form so it can cross the `Task.detached`
+    /// boundary that runs the blocking ssh work (a bare `any Error` isn't Sendable). Carries the failure
+    /// message for the row's red caption; `.installed` drives the green one.
+    enum RemoteHookInstallResult: Sendable { case installed; case failed(String) }
+    /// Per-host "Install hooks" outcome, keyed by `RemoteHost.id` — transient UI feedback (V27), so the
+    /// button no longer looks like it silently did nothing. Not persisted.
+    @Published private(set) var remoteHooksInstallResults: [String: RemoteHookInstallResult] = [:]
     /// False when `~/.claude/projects` doesn't exist — Claude Code was never installed (or never run) on
     /// this machine, so an empty session list means "nothing to watch", not "all quiet". Drives the
     /// panel's "Claude Code не найден" hint. Specifically the projects dir, NOT `~/.claude`: we create
@@ -42,11 +57,27 @@ final class StateEngine: ObservableObject {
 
     private let store = SessionStore()
     private let usage = UsageProvider()
+    private let remotePoller = RemoteTranscriptPoller()
+    private let remotePermissionRelay = RemotePermissionRelay()
     private var watcher: TranscriptWatcher?
     private var statusWatcher: TranscriptWatcher?
     private var pendingWatcher: TranscriptWatcher?
     private var stateTimer: Timer?
     private var usageTimer: Timer?
+    private var remotePollTimer: Timer?
+    private var remotePendingTimer: Timer?
+    /// Latest remote pending requests (all hosts), merged into `pendingRequests` on every render.
+    private var remotePendingRequests: [PermissionBroker.PendingRequest] = []
+    /// Latest LOCAL pending requests, kept separately so `recomputePending` can merge it with
+    /// `remotePendingRequests` without either poll loop clobbering the other's contribution.
+    private var localPendingRequests: [PermissionBroker.PendingRequest] = []
+    /// Namespaced remote session ids the user has blessed with "Allow all in chat". The remote hook shim
+    /// deliberately keeps NO allow-all/trusted memory of its own (unlike the local broker's in-hook
+    /// short-circuit) — that authority lives here, on the Mac: `autoDecideRemote` relays an instant
+    /// `allow` for any subsequently-polled request from one of these sessions (or one matching a trusted
+    /// command), before it ever reaches a ribbon. The remote parity of `PermissionBroker.isAllowAll` /
+    /// `TrustedCommands.isTrusted`. Pruned per-host by `removeRemoteHost`.
+    private var remoteAllowAll: Set<String> = []
     /// Runs only while `watchIDELog` is on AND a pending request has a `toolUseId` — polls the IDE log to
     /// drop the ribbon the moment the user answers in the IDE's own dialog. See `IDELogWatcher`.
     private var ideLogTimer: Timer?
@@ -138,6 +169,7 @@ final class StateEngine: ObservableObject {
         hooksInstalled = HooksInstaller.isInstalled()
         permissionHookInstalled = HooksInstaller.isPermissionHookInstalled()
         trustedCommands = TrustedCommands.load()
+        remoteHosts = RemoteHosts.load()
         accessibilityGranted = FocusResolver.accessibilityGranted
         let statusDir = HookHandler.statusDir
         try? FileManager.default.createDirectory(atPath: statusDir, withIntermediateDirectories: true)
@@ -173,6 +205,104 @@ final class StateEngine: ObservableObject {
         usageTimer = Timer.scheduledTimer(withTimeInterval: Tuning.usageRefresh, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { await self.refreshUsage() }
+        }
+
+        // Remote hosts: no FSEvents/hook-file-watch equivalent across SSH, so both are polled on their own
+        // timers, fully decoupled from the local `stateTimer`/`pendingWatcher` above — a slow or
+        // unreachable host can only stall its OWN poll tick, never local rendering. Gated: with no enabled
+        // host the two remote timers aren't even scheduled, so a user with zero remote hosts pays nothing
+        // for the SSH feature — no 2s pollRemotePending → recomputePending → render() storm on battery
+        // (V29/F5). CRUD toggles them via start/stopRemoteTimers.
+        startRemoteTimers()
+    }
+
+    /// Schedule the two remote poll timers IFF at least one host is enabled; a no-op (and tears any
+    /// existing timers down) otherwise. Idempotent — safe to call from `init` and every host CRUD path.
+    private func startRemoteTimers() {
+        guard RemoteHosts.load().contains(where: \.enabled) else { stopRemoteTimers(); return }
+        if remotePollTimer == nil {
+            let t = Timer.scheduledTimer(withTimeInterval: Tuning.remotePollInterval, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in self.pollRemoteSessions() }
+            }
+            t.tolerance = Tuning.remotePollInterval * 0.2   // let the OS coalesce ticks (state doesn't need exact timing)
+            remotePollTimer = t
+            pollRemoteSessions()
+        }
+        if remotePendingTimer == nil {
+            let t = Timer.scheduledTimer(withTimeInterval: Tuning.remotePendingPoll, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in self.pollRemotePending() }
+            }
+            t.tolerance = Tuning.remotePendingPoll * 0.2
+            remotePendingTimer = t
+            pollRemotePending()
+        }
+    }
+
+    /// Tear down the remote poll timers (no enabled hosts) so their cadence stops entirely.
+    private func stopRemoteTimers() {
+        remotePollTimer?.invalidate(); remotePollTimer = nil
+        remotePendingTimer?.invalidate(); remotePendingTimer = nil
+    }
+
+    private func pollRemoteSessions() {
+        remotePoller.pollAll { [weak self] in
+            guard let self else { return }
+            self.remoteHostStatuses = self.remotePoller.hostStatuses
+            self.render()
+        }
+    }
+
+    private func pollRemotePending() {
+        remotePermissionRelay.pollAll { [weak self] reqs in
+            guard let self else { return }
+            self.remotePendingRequests = self.autoDecideRemote(reqs)
+            self.recomputePending()
+        }
+    }
+
+    /// Filter freshly-polled remote pending requests: anything the user has already blessed for this
+    /// remote session ("Allow all in chat" ⇒ `remoteAllowAll`) or that matches a persistent trusted-command
+    /// rule is relayed `allow` at once and dropped from the set that reaches a ribbon — the remote parity
+    /// of the local in-hook allow-all / trusted-command short-circuit (`PermissionBroker.runHook`), which
+    /// likewise never shows a ribbon for these. Runs ONLY over remote requests (each carries `remoteHostId`
+    /// by construction — the relay only ever produces remote ones), so a LOCAL pending can never reach it.
+    /// Idempotent across ticks: once we write a `.decision`, `RemotePermissionRelay.fetchPending`'s
+    /// skip-decided filter (V21) drops the request on the next poll, so it's relayed at most once.
+    private func autoDecideRemote(_ reqs: [PermissionBroker.PendingRequest]) -> [PermissionBroker.PendingRequest] {
+        guard !reqs.isEmpty, !(remoteAllowAll.isEmpty && trustedCommands.isEmpty) else { return reqs }
+        var visible: [PermissionBroker.PendingRequest] = []
+        for req in reqs {
+            let allowAll = remoteAllowAll.contains(req.sessionId)
+            let trusted = allowAll ? false
+                : TrustedCommands.isTrusted(tool: req.tool, input: Self.trustedInput(tool: req.tool, detail: req.detail))
+            if allowAll || trusted {
+                Log.permissions.info("remote auto-allow tool=\(req.tool) sid=…\(req.sessionId.suffix(12)) "
+                    + "(\(allowAll ? "allow-all" : "trusted"))")
+                remotePermissionRelay.decide(requestId: req.requestId, decision: .allowOnce)
+            } else {
+                visible.append(req)
+            }
+        }
+        return visible
+    }
+
+    /// Best-effort reconstruction of the `tool_input` dict `TrustedCommands.isTrusted` needs, from the
+    /// single `detail` string the remote shim sends (it collapses command/file_path/url/notebook_path into
+    /// one field — `RemoteHookShim.summarize`). Keyed on the tool so `detail` lands under the SAME key the
+    /// matcher reads for that tool (Bash→command, WebFetch→url, file tools→file_path); an unknown tool maps
+    /// to nil so only a whole-tool-trust entry (empty pattern, which never consults input) can auto-allow
+    /// it — no key we might mis-map into a false allow. Faithful: for these tools `detail` IS exactly the
+    /// field the local matcher would inspect, so a remote auto-allow can never be broader than the local
+    /// one on the same command.
+    private static func trustedInput(tool: String, detail: String?) -> [String: Any]? {
+        guard let detail, !detail.isEmpty else { return nil }
+        switch tool {
+        case "Bash": return ["command": detail]
+        case "WebFetch": return ["url": detail]
+        case "Read", "Write", "Edit", "MultiEdit", "NotebookEdit": return ["file_path": detail]
+        default: return nil
         }
     }
 
@@ -240,16 +370,30 @@ final class StateEngine: ObservableObject {
     }
 
     private func refreshPending() async {
-        let pending = await Task.detached { PermissionBroker.listPending() }.value
-        activePendingSessions = Set(pending.map(\.sessionId))
+        localPendingRequests = await Task.detached { PermissionBroker.listPending() }.value
+        recomputePending()
+        updateIDELogWatch()
+    }
+
+    /// Merge local + remote pending requests into the published set. Called whenever EITHER side's poll
+    /// loop refreshes (`refreshPending` for local, `pollRemotePending` for remote) so neither clobbers
+    /// the other's latest contribution.
+    private func recomputePending() {
+        let all = localPendingRequests + remotePendingRequests
+        // Nothing pending now AND nothing was pending last pass → no change, so skip the render(). Without
+        // this the 2s remote pending poll re-renders the whole UI twice a second for a host that has no
+        // outstanding request. If either is non-empty there's real work: publish it, or clear one that
+        // just resolved. `activePendingSessions.isEmpty` is the faithful "was empty" signal — it's set in
+        // lockstep with `pendingRequests` from the same `all` on every prior pass (V29).
+        if all.isEmpty && activePendingSessions.isEmpty { return }
+        activePendingSessions = Set(all.map(\.sessionId))
         // Newest first so the most recent request sits at the top of the ribbon/panel's list.
-        pendingRequests = pending.sorted { $0.createdAt > $1.createdAt }
+        pendingRequests = all.sorted { $0.createdAt > $1.createdAt }
         // Keep the displayed state consistent with the pending set: the render() backstop downgrades a
         // permission `waiting` that has no live request, so a real request appearing/clearing must
         // re-render (this path doesn't otherwise trigger one). The ribbon at the light surfaces the
         // request now — no notification is posted (toasts were removed from the product).
         render()
-        updateIDELogWatch()
     }
 
     // MARK: - IDE-log watch (early permission resolution — WidgetSettings.watchIDELog, on by default)
@@ -309,6 +453,11 @@ final class StateEngine: ObservableObject {
             // demotes the status to working meanwhile.
             let hitReqIds = Set(hitReqs.map(\.requestId))
             pendingRequests.removeAll { hitReqIds.contains($0.requestId) }
+            // Also prune the cached local/remote sets, or the next recomputePending (the 2s remote tick, or
+            // a pending-dir FSEvent) rebuilds `pendingRequests` from the stale cache and RESURRECTS the
+            // just-resolved ribbon (V14). `decidePermission` already prunes these; `pollIDELog` was missed.
+            localPendingRequests.removeAll { hitReqIds.contains($0.requestId) }
+            remotePendingRequests.removeAll { hitReqIds.contains($0.requestId) }
             activePendingSessions = Set(pendingRequests.map(\.sessionId))
             Log.watcher.info("IDE-log resolved \(hitReqs.count) request(s) early (before completion) "
                 + "[\(hitReqs.compactMap { $0.toolUseId.map { String($0.prefix(12)) } }.joined(separator: ","))]")
@@ -355,6 +504,18 @@ final class StateEngine: ObservableObject {
         render()
     }
 
+    /// Local hook status merged with every reachable remote host's status (keyed by the namespaced id,
+    /// tagged with `remoteHostId`). `render()`/`hostInfo` read THIS so remote sessions flow through the
+    /// exact same status rules as local, while local keys stay untouched — remote keys are namespaced, so
+    /// disjoint from local uuids, and a local id resolves to exactly the same entry as before.
+    private var mergedStatus: [String: StatusEntry] {
+        var m = statusBySession
+        for hostStatuses in remotePoller.lastStatuses.values {
+            for (id, st) in hostStatuses { m[id] = st }
+        }
+        return m
+    }
+
     /// Merge mode A (file-watch) with mode B (hook status, precise), attach tokens, recompute color.
     /// On conflict the FRESHER signal wins: a recent Notification(waiting) overrides a stale mode-A
     /// "working", and a brand-new turn's writes override a stale hook "done".
@@ -363,7 +524,19 @@ final class StateEngine: ObservableObject {
         var byId: [String: SessionInfo] = [:]
         for s in rawSessions { byId[s.id] = s }
 
-        for (id, st) in statusBySession {
+        // Fold in the latest cached remote poll SESSIONS (mode-A state only). Safe unconditionally: remote
+        // ids live in the `"remote:<hostId>:<uuid>"` namespace (see `SessionInfo.remoteID`), which can
+        // never collide with a local uuid.
+        for hostSessions in remotePoller.lastSessions.values {
+            for (id, s) in hostSessions { byId[id] = s }
+        }
+
+        // Local hook status folded with every reachable remote host's status. Iterating THIS merged map
+        // instead of `statusBySession` IS the remote-normalization: a remote session now goes through the
+        // identical merge below (suppressDone / demote / native-wait / compacting), while local sessions
+        // resolve to exactly the same entries as before (remote keys are namespaced, disjoint).
+        let status = mergedStatus
+        for (id, st) in status {
             guard now.timeIntervalSince(st.updatedAt) <= staleWindow else { continue }
             // The permission broker writes `waiting` only while a request is actually pending. If its
             // hook process was SIGKILLed before it could reset (which skips the timeout reset), the
@@ -398,15 +571,19 @@ final class StateEngine: ObservableObject {
                 }
                 byId[id] = a
             } else {
+                // A status file with no matching session yet (transcript not tailed) still surfaces the
+                // chat; carry `remoteHostId` so a remote-only chat is tagged correctly (offline / pid-reap
+                // exclusion / deep-link) instead of looking local.
                 byId[id] = SessionInfo(id: id, project: st.project, cwd: st.cwd, gitBranch: nil,
-                                       title: nil, state: hookState, lastActivity: st.updatedAt)
+                                       title: nil, state: hookState, lastActivity: st.updatedAt,
+                                       remoteHostId: st.remoteHostId)
             }
         }
 
         // Host (IDE vs. terminal) is immutable for a session's life and known only to mode B (mode A
         // can't see the process tree), so stamp it from ANY status record — even one past `staleWindow`.
         // A "перейти в чат" jump to a chat whose last hook event is a while old still needs the right app.
-        for (id, st) in statusBySession where byId[id] != nil {
+        for (id, st) in status where byId[id] != nil {
             byId[id]?.host = st.host
             byId[id]?.hostBundleId = st.hostBundleId
         }
@@ -430,7 +607,7 @@ final class StateEngine: ObservableObject {
         // tail. Force it red here, on the SAME ground-truth tier as a live pending. Cleared automatically
         // when the next hook event (the resumed tool's `pre`/`post`, the turn's `stop`) overwrites
         // `last_event` to a non-wait event, or when the status ages past `staleWindow`.
-        for (id, st) in statusBySession where byId[id] != nil {
+        for (id, st) in status where byId[id] != nil {
             guard st.state == .waiting, now.timeIntervalSince(st.updatedAt) <= staleWindow,
                   let ev = st.lastEvent, Self.nativeWaitEvents.contains(ev) else { continue }
             byId[id]?.state = .waiting
@@ -438,7 +615,7 @@ final class StateEngine: ObservableObject {
 
         // Compacting decorates a `working` chat (mode B `PreCompact`). Applied AFTER the pending override
         // so a live permission request (→ red) always outranks the compacting chip on the same chat.
-        for (id, st) in statusBySession where st.isCompacting {
+        for (id, st) in status where st.isCompacting {
             guard now.timeIntervalSince(st.updatedAt) <= staleWindow else { continue }
             if byId[id]?.state == .working { byId[id]?.isCompacting = true }
         }
@@ -460,26 +637,41 @@ final class StateEngine: ObservableObject {
         //    narrow window (dead pid + >60 s silent) is an actually-exited session. A long single tool
         //    (no `post` for minutes) stays safe because its pid is still alive → the guard never fires.
         list.removeAll { s in
-            guard let st = statusBySession[s.id], let pid = st.ownerPid,
+            // pid-reap is LOCAL-only: never run `ProcTree.isAlive` on a remote host's pid (it belongs to
+            // another machine). `remoteHostId == nil` gates it — remote sessions are offline-marked / aged
+            // instead, never reaped by local process liveness.
+            guard let st = status[s.id], st.remoteHostId == nil, let pid = st.ownerPid,
                   now.timeIntervalSince(st.updatedAt) <= staleWindow,
                   !ProcTree.isAlive(pid) else { return false }
             if s.state == .done { return true }
             return now.timeIntervalSince(st.updatedAt) > Tuning.activeWindow
+        }
+        // V3: mark a session whose remote host is currently UNREACHABLE as offline — its state is a frozen
+        // last-known snapshot, so it must not pin the aggregate light (see `aggregate`) and the UI shows it
+        // "offline" rather than freezing a stale colour or silently dropping it.
+        let offlineHosts = Set(remotePoller.hostStatuses.filter { !$0.value.connected }.keys)
+        if !offlineHosts.isEmpty {
+            for i in list.indices where list[i].remoteHostId.map(offlineHosts.contains) ?? false {
+                list[i].isOffline = true
+            }
         }
         sessions = sortedForDisplay(list)
 
         // Log per-session state transitions with their raw inputs BEFORE `manageCompletions` rolls
         // `lastDisplayState` forward — this is the signal that was missing when the question-native /
         // permission flap was diagnosed only from aggregate-color churn. Reads the previous snapshot.
-        logStateTransitions()
+        logStateTransitions(status: status)
 
         // Attention items: red chats parked on a native prompt (`permission-native`/`question-native`),
         // whose fresh status carries that event and which have NO live pending request (those get the
         // actionable decision ribbon instead). Persist until the next hook event flips them off waiting.
         attentionSessions = sessions.compactMap { s -> AttentionItem? in
-            guard s.state == .waiting, !activePendingSessions.contains(s.id),
-                  let st = statusBySession[s.id], now.timeIntervalSince(st.updatedAt) <= staleWindow
-            else { return nil }
+            guard s.state == .waiting, !s.isOffline, !activePendingSessions.contains(s.id) else { return nil }
+            // Both local and remote status now live in the merged `status` map (remote folded in via
+            // `mergedStatus`), so this reads ONE path — the previous `else if s.isRemote` special-case
+            // (which had to look at `SessionInfo.lastEvent`) is gone. A remote chat parked on a native
+            // prompt gets its "→ open chat" ribbon through the exact same computation as local.
+            guard let st = status[s.id], now.timeIntervalSince(st.updatedAt) <= staleWindow else { return nil }
             let kind: AttentionItem.Kind
             switch st.lastEvent {
             case "question-native":   kind = .question
@@ -507,13 +699,13 @@ final class StateEngine: ObservableObject {
     /// false done, a flap all read straight from the log instead of needing a live re-catch. Diffs
     /// against `lastDisplayState` (the previous render's snapshot, rolled forward by `manageCompletions`,
     /// which runs right after this).
-    private func logStateTransitions() {
+    private func logStateTransitions(status: [String: StatusEntry]) {
         guard completionSeeded else { return }   // first render seeds the snapshot; nothing to diff yet
         let rawById = Dictionary(rawSessions.map { ($0.id, $0.state) }, uniquingKeysWith: { a, _ in a })
         for s in sessions {
             guard let prev = lastDisplayState[s.id], prev != s.state else { continue }
             let modeA = rawById[s.id]?.rawValue ?? "—"
-            let hook = statusBySession[s.id].map { "\($0.state.rawValue)/\($0.lastEvent ?? "?")" } ?? "—"
+            let hook = status[s.id].map { "\($0.state.rawValue)/\($0.lastEvent ?? "?")" } ?? "—"
             let pending = activePendingSessions.contains(s.id) ? "yes" : "no"
             Log.watcher.info("state sid=\(s.id.prefix(8)) \(prev.rawValue)→\(s.state.rawValue) "
                 + "(modeA=\(modeA) hook=\(hook) pending=\(pending))")
@@ -544,6 +736,15 @@ final class StateEngine: ObservableObject {
                                          branch: s.gitBranch ?? "", createdAt: now),
                         at: 0)
                     Log.watcher.info("chat finished sid=\(s.id.prefix(8)) project=\(s.project) → done notice")
+                    // Precise auto-dismiss at exactly `doneNoticeWindow`, so the card vanishes in step with
+                    // the ribbon's countdown bar (the render-based expiry above is only a coarse backstop
+                    // bounded by the tick). `ifCreatedAt` makes it a no-op if a resume/tap cleared this
+                    // notice first, or a NEW episode replaced it — it only ever removes THIS one.
+                    let sid = s.id, created = now
+                    Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: UInt64(Tuning.doneNoticeWindow * 1_000_000_000))
+                        self?.dismissCompletion(sid, ifCreatedAt: created)
+                    }
                 }
             }
         }
@@ -559,16 +760,20 @@ final class StateEngine: ObservableObject {
         completionSeeded = true
     }
 
-    /// Dismiss a "done" notice — the user jumped to that chat from its ribbon.
-    func dismissCompletion(_ sessionId: String) {
-        completionNotices.removeAll { $0.id == sessionId }
+    /// Dismiss a "done" notice — the user jumped to that chat from its ribbon, or its countdown elapsed.
+    /// `ifCreatedAt` (used by the scheduled auto-dismiss) removes the notice ONLY if it's still the same
+    /// episode's, so a newer notice for the same chat isn't cleared out from under the user.
+    func dismissCompletion(_ sessionId: String, ifCreatedAt: Date? = nil) {
+        completionNotices.removeAll { $0.id == sessionId && (ifCreatedAt == nil || $0.createdAt == ifCreatedAt) }
     }
 
     /// Host + bundle id for a session, from its mode-B status (the sole authority on host). `.unknown`/nil
     /// when there's no status record — `DeepLinker` then falls back to the Cursor path. Used by the ribbon
     /// "перейти в чат" actions, whose `RibbonItem`s carry only a session id.
     func hostInfo(for sessionId: String) -> (host: SessionHost, bundleId: String?) {
-        guard let st = statusBySession[sessionId] else { return (.unknown, nil) }
+        // Merged so a remote session (namespaced id) resolves too — DeepLinker forks on `remoteHostId`
+        // before reaching here for remotes, but keeping this on the same map avoids a local-only gap.
+        guard let st = mergedStatus[sessionId] else { return (.unknown, nil) }
         return (st.host, st.hostBundleId)
     }
 
@@ -616,7 +821,27 @@ final class StateEngine: ObservableObject {
     /// decision the blocking hook is polling for, then optimistically drops it from the list so the row
     /// disappears at once (the pending-dir watcher reconciles the authoritative state right after).
     func decidePermission(_ req: PermissionBroker.PendingRequest, _ decision: PermissionBroker.Decision) {
-        PermissionBroker.decide(requestId: req.requestId, decision)
+        if req.remoteHostId != nil {
+            // "Allow all in chat" on a remote request: remember it HERE (the shim keeps no such memory) so
+            // `autoDecideRemote` relays an instant allow for every later request from this session. The
+            // remote parity of the local broker's `setAllowAll`.
+            if decision == .allowAll { remoteAllowAll.insert(req.sessionId) }
+            remotePermissionRelay.decide(requestId: req.requestId, decision: decision) { [weak self] message in
+                guard let self else { return }
+                // The relay retried and still couldn't reach the host — the click never got to the remote
+                // hook (still blocking). Don't let it vanish silently: re-surface the request so the ribbon
+                // comes back with live buttons to retry (the next poll reconciles if it did in fact land).
+                Log.settings.warn("remote decision relay failed for req=\(req.requestId.prefix(8)): \(message)")
+                if !self.remotePendingRequests.contains(where: { $0.requestId == req.requestId }) {
+                    self.remotePendingRequests.append(req)
+                    self.recomputePending()
+                }
+            }
+            remotePendingRequests.removeAll { $0.requestId == req.requestId }
+        } else {
+            PermissionBroker.decide(requestId: req.requestId, decision)
+            localPendingRequests.removeAll { $0.requestId == req.requestId }
+        }
         pendingRequests.removeAll { $0.requestId == req.requestId }
         if !pendingRequests.contains(where: { $0.sessionId == req.sessionId }) {
             activePendingSessions.remove(req.sessionId)
@@ -636,6 +861,91 @@ final class StateEngine: ObservableObject {
     func removeTrustedCommand(_ entry: TrustedCommands.Entry) {
         trustedCommands = TrustedCommands.remove(entry)
         Log.settings.info("trusted remove tool=\(entry.tool.isEmpty ? "*" : entry.tool) pattern=\(entry.pattern)")
+    }
+
+    // MARK: - Remote hosts (SSH-monitored VS Code + Claude Code sessions on other machines)
+
+    func addRemoteHost(_ host: RemoteHost) {
+        remoteHosts = RemoteHosts.add(host)
+        startRemoteTimers()   // a newly-added enabled host may be the first — ensure the remote timers run
+        pollRemoteSessions()
+    }
+
+    func updateRemoteHost(_ host: RemoteHost) {
+        remoteHosts = RemoteHosts.update(host)
+        startRemoteTimers()   // the enabled-set may have flipped (e.g. the last host disabled) — retoggle
+        pollRemoteSessions()
+        render()   // reflect an enable/disable at once, even when no host remains to poll-and-render
+    }
+
+    func removeRemoteHost(_ id: String) {
+        remoteHosts = RemoteHosts.remove(id: id)
+        remoteHostStatuses.removeValue(forKey: id)
+        remoteTestResults.removeValue(forKey: id)
+        remoteHooksInstallResults.removeValue(forKey: id)
+        // Drop that host's allow-all memory too — its sessions are gone, so the entries would only leak.
+        remoteAllowAll = remoteAllowAll.filter { SessionInfo.parseRemoteID($0)?.hostId != id }
+        // Drop the host's sessions from the merge buffer so render()'s re-fold can't resurrect them; the
+        // next render() then omits them (precise prune instead of mutating the published `sessions`
+        // directly, which the fold would immediately overwrite anyway — V19).
+        remotePoller.prune(hostId: id)
+        startRemoteTimers()   // may have removed the last enabled host — stop the timers if so
+        render()
+    }
+
+    func setRemoteHostEnabled(_ id: String, enabled: Bool) {
+        guard var host = remoteHosts.first(where: { $0.id == id }) else { return }
+        host.enabled = enabled
+        updateRemoteHost(host)
+    }
+
+    /// "Test Connection" UI action — runs a non-batch ssh (see `RemoteExec.testConnection`) so a
+    /// brand-new host's known_hosts prompt can complete once, and stores the detected platform on
+    /// success so `RemoteHooksInstaller` can refuse a non-macOS-incompatible install path later.
+    func testRemoteConnection(_ host: RemoteHost) {
+        Task { [weak self] in
+            // Offload the blocking ssh round-trip to a background task, then hop back to the
+            // main actor (inherited by this Task) to touch @Published state.
+            let result = await Task.detached(priority: .userInitiated) {
+                RemoteExec.testConnection(host)
+            }.value
+            guard let self else { return }
+            self.remoteTestResults[host.id] = result
+            if case .success(let platform) = result {
+                // Re-read the LIVE host: the user may have toggled `enabled` / edited it during the
+                // multi-second ssh. Merge ONLY the detected platform onto the current copy, so that
+                // concurrent edit isn't clobbered by writing back the pre-ssh snapshot (S2).
+                guard var current = self.remoteHosts.first(where: { $0.id == host.id }) else { return }
+                current.platform = platform
+                self.remoteHosts = RemoteHosts.update(current)
+            }
+        }
+    }
+
+    /// "Install hooks" UI action. Mirrors `testRemoteConnection`: offload the blocking ssh work to a
+    /// detached task, then hop back to the main actor to publish a per-host outcome the row renders
+    /// (green "installed" / red failure) — the old version log-and-dropped, so the button looked inert on
+    /// both success and failure (V27).
+    func installRemoteHooks(_ host: RemoteHost) {
+        Task { [weak self] in
+            let result: RemoteHookInstallResult = await Task.detached(priority: .userInitiated) {
+                do { try RemoteHooksInstaller.install(host); return .installed }
+                catch { return .failed(error.localizedDescription) }
+            }.value
+            guard let self else { return }
+            self.remoteHooksInstallResults[host.id] = result
+            switch result {
+            case .installed: Log.settings.info("remote hooks installed (\(host.label))")
+            case .failed(let msg): Log.settings.error("remote hook install failed (\(host.label)): \(msg)")
+            }
+        }
+    }
+
+    func uninstallRemoteHooks(_ host: RemoteHost) {
+        Task.detached(priority: .userInitiated) {
+            do { try RemoteHooksInstaller.uninstall(host) }
+            catch { Log.settings.error("remote hook uninstall failed (\(host.label)): \(error.localizedDescription)") }
+        }
     }
 
     /// Run a settings.json mutation and surface any failure (e.g. a malformed or unwritable file)

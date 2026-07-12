@@ -151,6 +151,15 @@ App Sandbox est **désactivé** (nécessaire pour lire `~/.claude`), la distribu
 du Mac App Store. Les issues et pull requests sont les bienvenus. Les versions signées sont publiées par
 le mainteneur via GitHub Actions — voir [`docs/RELEASING.md`](docs/RELEASING.md).
 
+## Remerciements
+
+Merci à toutes les personnes qui ont contribué des fonctionnalités à ccemaphore :
+
+- **[@Striker72rus](https://github.com/Striker72rus)** (Sergey Dontsov) — surveillance d'hôtes
+  distants via SSH et relais de permissions ([#1](https://github.com/hakkazuu/ccemaphore/pull/1)),
+  ainsi que la disposition horizontale du feu tricolore et un correctif empêchant le widget flottant
+  de s'échapper de son emplacement près du Dock ([#2](https://github.com/hakkazuu/ccemaphore/pull/2)).
+
 ## Licence
 
 MIT — voir [LICENSE](LICENSE).

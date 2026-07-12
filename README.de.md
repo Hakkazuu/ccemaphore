@@ -150,6 +150,15 @@ App Sandbox ist **aus** (nötig, um `~/.claude` zu lesen), daher erfolgt die Ver
 Mac App Store. Issues und Pull Requests sind willkommen. Signierte Releases erstellt der Maintainer über
 GitHub Actions – siehe [`docs/RELEASING.md`](docs/RELEASING.md).
 
+## Danksagungen
+
+Dank an alle, die Funktionen zu ccemaphore beigetragen haben:
+
+- **[@Striker72rus](https://github.com/Striker72rus)** (Sergey Dontsov) — Überwachung entfernter
+  Hosts per SSH und Berechtigungs-Relay ([#1](https://github.com/hakkazuu/ccemaphore/pull/1)) sowie
+  das horizontale Ampel-Layout und eine Korrektur, damit das schwebende Widget nicht mehr aus seiner
+  Dock-Position ausbricht ([#2](https://github.com/hakkazuu/ccemaphore/pull/2)).
+
 ## Lizenz
 
 MIT — siehe [LICENSE](LICENSE).

@@ -162,28 +162,9 @@ actor SessionStore {
     private func state(of r: SessionRecord, now: Date) -> SessionState {
         let age = now.timeIntervalSince(r.lastRealTimestamp)
         if age > staleWindow { return .stale }
-
-        // A trailing tool_result means the assistant still OWES its continuation — the turn is not
-        // finished, however long it pauses to think between tool calls. A genuine end-of-turn appends
-        // an assistant `end_turn` line, which becomes `.doneEndTurn` instead. So this must stay
-        // `working` regardless of age (until it goes stale): letting a cooled tool_result fall through
-        // to `done` was the "🟢 green while still working" bug during long thinking pauses (a "Thought
-        // for 66s" exceeds the 60s activeWindow, so the tail cooled and read as finished).
-        if r.lastShape == .userToolResult { return .working }
-
-        if age <= activeWindow {
-            switch r.lastShape {
-            case .working, .systemRetry:
-                return .working
-            case .userToolResult, .doneEndTurn, .other:
-                break
-            }
-        }
-
-        // Cooled / settled tail.
-        if r.lastShape == .doneEndTurn { return .done }
-        if r.hasUnpairedToolUse { return .waiting }   // best-effort "looks like it needs the user"
-        return .done
+        // Stale gate applied; the live-tail ladder is shared with the remote poller (see TailClassifier).
+        return TailClassifier.classify(
+            shape: r.lastShape, age: age, hasUnpaired: r.hasUnpairedToolUse, activeWindow: activeWindow)
     }
 
     // MARK: - Classification
@@ -220,8 +201,8 @@ actor SessionStore {
             gitBranch: branch,
             title: title,
             lastRealTimestamp: lastTime,
-            lastShape: shape(of: last),
-            hasUnpairedToolUse: hasUnpairedToolUse(parsed),
+            lastShape: TailClassifier.shape(of: last),
+            hasUnpairedToolUse: TailClassifier.hasUnpairedToolUse(parsed),
             context: contextInfo(from: parsed)
         )
 
@@ -247,43 +228,6 @@ actor SessionStore {
         if last.type == "assistant", let sr = last.message?.stopReason,
            sr == "end_turn" || sr == "stop_sequence" { return false }
         return true
-    }
-
-    // MARK: - Tail shape & tool pairing
-
-    private func shape(of line: LogLine) -> TailShape {
-        if line.type == "assistant" {
-            switch line.message?.stopReason {
-            case "end_turn", "stop_sequence": return .doneEndTurn
-            case "tool_use": return .working
-            case .none: return .working               // unfinalized streaming line
-            default: return .other
-            }
-        }
-        if line.type == "user" {
-            let blocks = line.message?.content?.blocks ?? []
-            if blocks.contains(where: { $0.type == "tool_result" }) { return .userToolResult }
-            return .working                            // fresh prompt — the agent owes a turn
-        }
-        return .other
-    }
-
-    /// True if the last assistant line carries a tool_use whose id has no matching tool_result after it.
-    private func hasUnpairedToolUse(_ lines: [LogLine]) -> Bool {
-        guard let i = lines.lastIndex(where: { $0.type == "assistant" }) else { return false }
-        let toolIds = (lines[i].message?.content?.blocks ?? [])
-            .compactMap { $0.type == "tool_use" ? $0.id : nil }
-        guard !toolIds.isEmpty else { return false }
-
-        var resolved = Set<String>()
-        if i + 1 < lines.count {
-            for line in lines[(i + 1)...] {
-                for block in line.message?.content?.blocks ?? [] where block.type == "tool_result" {
-                    if let t = block.toolUseId { resolved.insert(t) }
-                }
-            }
-        }
-        return toolIds.contains { !resolved.contains($0) }
     }
 
     // MARK: - Helpers
@@ -322,15 +266,7 @@ private struct SessionRecord {
     let gitBranch: String?
     let title: String?
     var lastRealTimestamp: Date
-    var lastShape: TailShape
+    var lastShape: TailShape          // shared enum — see TailClassifier
     var hasUnpairedToolUse: Bool
     var context: ContextInfo?
-}
-
-private enum TailShape {
-    case working          // mid-turn: assistant tool_use / unfinalized stream / fresh user prompt
-    case userToolResult   // tool result just arrived; agent about to continue
-    case systemRetry      // api_error auto-retry
-    case doneEndTurn      // clean finish
-    case other
 }

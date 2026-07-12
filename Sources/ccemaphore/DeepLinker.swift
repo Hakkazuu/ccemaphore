@@ -32,8 +32,25 @@ enum DeepLinker {
             ?? "/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
     }
 
+    /// VS Code's install location, resolved the same way as `cursorAppURL` (via the `vscode://` scheme
+    /// handler, falling back to the canonical /Applications path). Used only by `focusRemote` — VS Code
+    /// isn't otherwise a first-class host in this file the way Cursor is.
+    private static let vscodeAppURL: URL? = {
+        if let probe = URL(string: "vscode://"),
+           let app = NSWorkspace.shared.urlForApplication(toOpen: probe) { return app }
+        let canonical = URL(fileURLWithPath: "/Applications/Visual Studio Code.app")
+        return FileManager.default.fileExists(atPath: canonical.path) ? canonical : nil
+    }()
+    private static var vscodeBin: String? {
+        guard let app = vscodeAppURL else { return nil }
+        let path = app.appendingPathComponent("Contents/Resources/app/bin/code").path
+        return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+    }
+    private static let vscodeBundleId: String? = vscodeAppURL.flatMap { Bundle(url: $0)?.bundleIdentifier }
+
     static func focus(_ session: SessionInfo) {
-        focus(sessionId: session.id, cwd: session.cwd, host: session.host, hostBundleId: session.hostBundleId)
+        focus(sessionId: session.id, cwd: session.cwd, host: session.host, hostBundleId: session.hostBundleId,
+              remoteHostId: session.remoteHostId)
     }
 
     /// Jump to a chat given only its id (+ cwd + host) — the ribbon's "open chat" path. Best-effort, and
@@ -56,8 +73,13 @@ enum DeepLinker {
     ///                                   still land on the right window; a CLI/ssh session can no
     ///                                   longer be forked into a second client.
     static func focus(sessionId: String, cwd: String?,
-                      host: SessionHost = .unknown, hostBundleId: String? = nil) {
+                      host: SessionHost = .unknown, hostBundleId: String? = nil,
+                      remoteHostId: String? = nil) {
         let sid = sessionId.prefix(8)
+        if let remoteHostId {
+            focusRemote(remoteHostId: remoteHostId, cwd: cwd, sid: sid)
+            return
+        }
         switch host {
         case .terminal:
             activateHostApp(bundleId: hostBundleId, sid: sid, kind: "terminal")
@@ -68,6 +90,87 @@ enum DeepLinker {
         case .ide, .unknown:
             focusCursor(sessionId: sessionId, cwd: cwd, sid: sid, host: host, openChatTab: false)
         }
+    }
+
+    /// A remote session (see `SessionInfo.remoteHostId`): the local Cursor CLI / Accessibility machinery
+    /// above is entirely local-app-only and has no reach into a chat running on another machine. What DOES
+    /// work when the user connects via VS Code's Remote-SSH extension (the setup this app assumes remote
+    /// hosts run under — see `RemoteHooksInstaller`'s doc comment) is VS Code's own deep-link scheme:
+    /// `vscode://vscode-remote/ssh-remote+<host>/<absolutePath>` asks the LOCAL VS Code app to open (or
+    /// focus, if already open) a Remote-SSH window onto that folder.
+    ///
+    /// Deliberately WINDOW-ONLY, same caution as an unconfirmed local IDE (see `focus`'s doc comment):
+    /// there is no verified `vscode://Anthropic.claude-code/open?session=…` tab-level deep-link the way
+    /// Cursor's is confirmed, so guessing one risks the same "resume in a second client" fork this file
+    /// otherwise goes out of its way to avoid. Opening the right PROJECT window is still most of the value
+    /// (the user lands in the right VS Code window and picks the chat from its own session list) without
+    /// that risk. Best-effort and silent on failure, like every other path here — a stray remote host with
+    /// no local VS Code / no matching SSH config entry just doesn't jump, it never errors visibly.
+    private static func focusRemote(remoteHostId: String, cwd: String?, sid: Substring) {
+        guard let host = RemoteHosts.resolve(remoteHostId) else {
+            Log.focus.info("jump sid=\(sid): remote host \(remoteHostId.prefix(8)) no longer configured — skip")
+            return
+        }
+        guard let cwd, !cwd.isEmpty else {
+            Log.focus.info("jump sid=\(sid) host=remote(\(host.label)): no cwd recorded — skip")
+            return
+        }
+        // VS Code resolves this the same way ssh does: an `~/.ssh/config` Host alias when the host is
+        // configured that way, otherwise `user@hostname` (falling back to bare hostname with no user).
+        let authority: String
+        if host.useSSHConfigOnly {
+            authority = host.hostname
+        } else if let user = host.sshUser, !user.isEmpty {
+            authority = "\(user)@\(host.hostname)"
+        } else {
+            authority = host.hostname
+        }
+        let authorityPart = "ssh-remote+\(authority)"
+
+        // FIRST choice: raise an already-open window directly via Accessibility, matching the host in its
+        // title — VS Code titles a Remote-SSH window "… [SSH: <host>]". Neither the `code` CLI's
+        // `--folder-uri` NOR the `vscode://vscode-remote/...` URI were found to reuse an existing window
+        // for an already-open remote folder (both were confirmed live to always spawn a fresh one), so
+        // this AX-based match is the only path that avoids window-duplication for a remote jump.
+        if let bundleId = vscodeBundleId, FocusResolver.accessibilityGranted {
+            for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleId) {
+                let pid = app.processIdentifier
+                for (window, title) in FocusResolver.windowTitles(pid: pid)
+                where title.localizedCaseInsensitiveContains(host.hostname)
+                    || (host.sshUser.map { title.localizedCaseInsensitiveContains($0) } ?? false) {
+                    FocusResolver.raiseWindow(window, appPid: pid)
+                    Log.focus.info("jump sid=\(sid) host=remote(\(host.label)) via=ax-window-match ok")
+                    return
+                }
+            }
+        }
+
+        // Fall back to the `code` CLI (spawns a fresh window if none matched above, or if Accessibility
+        // isn't granted / VS Code isn't running yet to search).
+        if let bin = vscodeBin {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: bin)
+            p.arguments = ["--folder-uri", "vscode-remote://\(authorityPart)\(cwd)"]
+            do {
+                try p.run()
+                Log.focus.info("jump sid=\(sid) host=remote(\(host.label)) via=code-cli ok")
+                return
+            } catch {
+                Log.focus.warn("jump sid=\(sid) host=remote(\(host.label)): code CLI launch failed "
+                    + "(\(error.localizedDescription)) — falling back to vscode:// URI")
+            }
+        }
+
+        var comps = URLComponents()
+        comps.scheme = "vscode"
+        comps.host = "vscode-remote"
+        comps.path = "/\(authorityPart)\(cwd)"
+        guard let url = comps.url else {
+            Log.focus.warn("jump sid=\(sid): could not build the vscode-remote deep-link URL")
+            return
+        }
+        let ok = NSWorkspace.shared.open(url)
+        Log.focus.info("jump sid=\(sid) host=remote(\(host.label)) via=uri-fallback deeplink=\(ok ? "ok" : "FAILED")")
     }
 
     /// The Cursor path: focus the project's window via the CLI, then (for a confirmed-Cursor chat) reveal

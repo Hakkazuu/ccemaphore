@@ -15,6 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Bring up the always-on-screen floating widget (the redesign's primary surface). System
         // toast notifications were removed — all interaction lives at the light / ribbon / panel.
         FloatingWidgetController.shared.start()
+        // The menu-bar status item (v3 — a manual NSStatusItem, see StatusItemController's doc comment
+        // for why SwiftUI's MenuBarExtra can't support right-click-pins/left-click-menu).
+        StatusItemController.shared.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -65,7 +65,11 @@ enum PermissionBroker {
 
     struct PendingRequest: Codable, Sendable {
         let requestId: String
-        let sessionId: String
+        // `var`, not `let`: `RemotePermissionRelay` rewrites this to the namespaced
+        // `"remote:<hostId>:<uuid>"` form after decoding a remote pending file (which carries the plain
+        // uuid the remote hook shim knows, matching what `SessionInfo.id` uses for remote sessions) — see
+        // its doc comment for why this must match or the render()-side force-red rule silently no-ops.
+        var sessionId: String
         let tool: String
         let summary: String
         /// The raw command / file path / URL being requested — shown in the ribbon's `$ …` chip
@@ -79,6 +83,11 @@ enum PermissionBroker {
         /// (which fires at approval, before completion) to THIS request. nil ⇒ no early IDE-log detection
         /// for this request (falls back to completion-time resolution). Optional for back-compat decode.
         let toolUseId: String?
+        /// Set by `RemotePermissionRelay` after fetching this request from a remote host's pending dir —
+        /// never present in the JSON itself (local pending files never carry it; decodes to nil, matching
+        /// a local request). Routes `StateEngine.decidePermission` to the relay instead of the local
+        /// broker, and drives the ribbon's host badge.
+        var remoteHostId: String? = nil
     }
 
     // MARK: - Hook side (blocking; runs as `--hook permission` [PreToolUse] / `--hook permission-request`)
@@ -344,6 +353,18 @@ enum PermissionBroker {
         }
     }
 
+    /// Shared per-request liveness predicate for the pending set — used by the remote relay's
+    /// `fetchPending` (and mirroring `listPending`'s own inline rules below) so the "skip a
+    /// decided-but-not-yet-GC'd request" rule (which stops a just-clicked ribbon flashing back before the
+    /// cleanup lands, bug3a) and the orphan age-out can't drift between the local and remote paths.
+    /// `hasDecision` = a `<reqId>.decision` already exists; `staleAfter` bounds a request whose owning hook
+    /// never cleaned it up. Pure — safe to call from the relay's nonisolated context.
+    static func isPendingLive(createdAt: String, staleAfter: TimeInterval, hasDecision: Bool, now: Date = Date()) -> Bool {
+        if hasDecision { return false }
+        if let created = parseISO(createdAt), now.timeIntervalSince(created) > staleAfter { return false }
+        return true
+    }
+
     static func listPending() -> [PendingRequest] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: pendingDir) else { return [] }
@@ -407,10 +428,7 @@ enum PermissionBroker {
         try? fm.removeItem(atPath: path)
     }
 
-    private static func parseISO(_ s: String) -> Date? {
-        (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(s))
-            ?? (try? Date.ISO8601FormatStyle().parse(s))
-    }
+    private static func parseISO(_ s: String) -> Date? { ISOTime.parse(s) }
 
     // MARK: - Internals
 
@@ -424,6 +442,8 @@ enum PermissionBroker {
         // Disambiguate parallel same-tool calls by the tool's primary identifier (command / file_path /
         // url / …), not just Bash's command — else two parallel Reads could pick the wrong tool_use.id.
         let wantSig = inputSignature(payload["tool_input"])
+        // Collect THIS tool's tool_use blocks from the transcript tail, newest-first.
+        var sameNamed: [(id: String, sig: String?)] = []
         for line in TailReader.tailLines(path: path).reversed() {
             guard let data = line.data(using: .utf8),
                   let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -432,13 +452,20 @@ enum PermissionBroker {
                   let content = msg["content"] as? [[String: Any]] else { continue }
             for block in content.reversed() where (block["type"] as? String) == "tool_use" {
                 guard (block["name"] as? String) == tool, let id = block["id"] as? String else { continue }
-                // If both sides expose an identifier, they must match; if we can't compute one, fall back
-                // to the newest same-named block (best effort — nil just disables early detection).
-                if let wantSig, let bsig = inputSignature(block["input"]), bsig != wantSig { continue }
-                return id
+                sameNamed.append((id, inputSignature(block["input"])))
             }
         }
-        return nil
+        guard !sameNamed.isEmpty else { return nil }
+        // With a signature, match on it (disambiguates parallel same-tool calls) — identical to before:
+        // the newest block whose identifier matches this request's.
+        if let wantSig { return sameNamed.first { $0.sig == wantSig }?.id }
+        // Signature-less tool (WebSearch's `query`, most MCP tools): matching by NAME against an EARLIER
+        // already-dispatched call would false-resolve the ribbon on the watcher's first poll (the bug the
+        // blanket skip fixed). But when the tail holds EXACTLY ONE same-named tool_use there is no
+        // ambiguity — it is unambiguously THIS request (single in-flight) — so the IDE-log join is safe.
+        // Only then fall back to it; otherwise skip (nil ⇒ no early IDE-log detection), as before. This
+        // recovers early resolution for the common single-in-flight case that the blanket skip regressed.
+        return sameNamed.count == 1 ? sameNamed[0].id : nil
     }
 
     /// A tool call's primary identifier for matching a transcript tool_use to a hook payload — the first

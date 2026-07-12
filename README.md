@@ -139,6 +139,15 @@ App Sandbox is **off** (required to read `~/.claude`), so distribution is outsid
 Issues and pull requests are welcome. Signed releases are cut by the maintainer via GitHub Actions —
 see [`docs/RELEASING.md`](docs/RELEASING.md).
 
+## Credits
+
+Thanks to everyone who contributed features to ccemaphore:
+
+- **[@Striker72rus](https://github.com/Striker72rus)** (Sergey Dontsov) — SSH remote-host monitoring
+  & permission relay ([#1](https://github.com/hakkazuu/ccemaphore/pull/1)), plus the horizontal
+  traffic-light layout and a fix for the floating widget escaping its Dock placement
+  ([#2](https://github.com/hakkazuu/ccemaphore/pull/2)).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

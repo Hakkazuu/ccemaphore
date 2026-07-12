@@ -35,9 +35,18 @@ enum Tuning {
     /// the ribbon when the user answers in the IDE's own dialog. Only runs while enabled + a request pends.
     static let ideLogPoll: TimeInterval = 1
     /// How long a "chat finished" notice rides the light before auto-clearing — the redesign's in-widget
-    /// replacement for the old done toast. Long enough to notice, short enough not to clutter; expiry is
-    /// enforced on the next render, so the 5 s `stateTick` bounds the lag.
-    static let doneNoticeWindow: TimeInterval = 12
+    /// replacement for the old done toast. Also the duration of the ribbon's countdown bar and of the
+    /// precise per-notice auto-dismiss scheduled in `manageCompletions` (the render-based expiry is a
+    /// coarse backstop). Long enough to notice, short enough not to clutter.
+    static let doneNoticeWindow: TimeInterval = 5
+    /// How often each enabled remote host is re-scanned for session/status changes over SSH (there is no
+    /// FSEvents equivalent across a network — this is a poll, decoupled from `stateTick` so one slow/hung
+    /// host can never stall local rendering).
+    static let remotePollInterval: TimeInterval = 5
+    /// How often the local app polls a remote host's pending-permission directory for new requests. The
+    /// DECISION itself is relayed immediately on click (not queued behind this poll) — this interval only
+    /// bounds how quickly a brand-new remote request is discovered.
+    static let remotePendingPoll: TimeInterval = 2
 }
 
 /// Per-session state in the traffic-light model (mode A, file-watch).
@@ -123,6 +132,10 @@ struct DayStat: Identifiable, Sendable, Equatable {
 
 /// UI-facing snapshot of one live session.
 struct SessionInfo: Identifiable, Sendable {
+    /// sessionId (uuid) for a local session. Remote-origin sessions (from `RemoteTranscriptPoller`) use
+    /// the namespaced form `"remote:<hostId>:<uuid>"` so they can never collide with a local uuid in
+    /// `StateEngine`'s id-keyed merge — minted/parsed ONLY through `remoteID`/`parseRemoteID` below, so
+    /// the poller and the permission relay can never produce differently-shaped keys.
     let id: String            // sessionId (uuid)
     let project: String       // last path component of cwd (fallback: slug-derived)
     var cwd: String? = nil    // full project path — for `cursor -r <cwd>` deep-link
@@ -138,11 +151,40 @@ struct SessionInfo: Identifiable, Sendable {
     /// used to raise a terminal app that Claude Code can't deep-link into by tab.
     var host: SessionHost = .unknown
     var hostBundleId: String? = nil
+    /// Non-nil ⇒ this session was discovered on a remote host (`RemoteHost.id`) rather than the local
+    /// machine. Orthogonal to `host` (IDE vs. terminal, which applies on either machine).
+    var remoteHostId: String? = nil
+    var isRemote: Bool { remoteHostId != nil }
+
+    /// The one owner of the `"remote:<hostId>:<uuid>"` namespaced-id format (and its inverse). Both the
+    /// transcript poller (`SessionInfo.id`) and the permission relay (`PendingRequest.sessionId`) mint the
+    /// id through `remoteID`, so the two can never drift out of shape and silently miss `render()`'s
+    /// id-keyed join; `parseRemoteID` recovers `(hostId, uuid)` for routing a decision / normalizing
+    /// remote status. `hostId` is a `RemoteHost.id` (UUID, no `:`), so a 2-split cleanly recovers both.
+    static func remoteID(hostId: String, uuid: String) -> String { "remote:\(hostId):\(uuid)" }
+
+    static func parseRemoteID(_ id: String) -> (hostId: String, uuid: String)? {
+        let parts = id.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 3, parts[0] == "remote" else { return nil }
+        return (hostId: parts[1], uuid: parts[2])
+    }
+    /// The mode-B hook event that produced the CURRENT `state` (e.g. "permission-native",
+    /// "question-native") — remote-only (`RemoteTranscriptPoller`'s status overlay sets it; local
+    /// sessions carry the same information in `StateEngine`'s separate `statusBySession` map instead, so
+    /// this stays nil for them). Lets `StateEngine.render()` build a remote `AttentionItem` the same way
+    /// it already does for local "parked on a native prompt" chats — without it, a remote chat that timed
+    /// out waiting for an Allow/Deny decision just sits red with no ribbon and no way to open it.
+    var lastEvent: String? = nil
     /// The chat is compacting its context right now (mode B `PreCompact` hook). A sub-state of `working`
     /// — the state stays `.working` (yellow), this flag only DECORATES it so the UI can say "сжимается,
     /// not stuck" without minting a 5th traffic-light colour. Purely mode B: the transcript is silent
     /// during the (up to ~90s) compaction, so mode A can't see it.
     var isCompacting: Bool = false
+    /// This session lives on a remote host that is currently UNREACHABLE (its poll is failing). Its state
+    /// is a frozen last-known snapshot, so it must NOT drive the aggregate light as if live (see
+    /// `aggregate`) and the UI marks it "offline" rather than showing a stale colour. Set by
+    /// `StateEngine.render()` from the poller's per-host `connected` flag; always false for local sessions.
+    var isOffline: Bool = false
 
     var dot: String {
         switch state {
@@ -223,7 +265,9 @@ func sortedForDisplay(_ sessions: [SessionInfo]) -> [SessionInfo] {
 /// render() backstop demotes it to `working` first (StateEngine). So: any waiting → red; else any
 /// working → yellow; else (all done) → green.
 func aggregate(_ sessions: [SessionInfo]) -> AggregateColor {
-    let live = sessions.filter { $0.state != .stale }
+    // Offline remote sessions carry a frozen last-known state — exclude them (like stale) so an
+    // unreachable host's cached red/yellow can't pin the light; the UI marks them offline instead.
+    let live = sessions.filter { $0.state != .stale && !$0.isOffline }
     if live.isEmpty { return .gray }
     if live.contains(where: { $0.state == .waiting }) { return .red }
     if live.contains(where: { $0.state == .working }) { return .yellow }

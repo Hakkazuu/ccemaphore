@@ -5,7 +5,14 @@ All notable changes to **ccemaphore** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - 2026-07-17
+## [1.2.1] - 2026-07-19
+
+### Fixed
+- The floating widget no longer jumps above the Dock when a permission ribbon resizes it taller — the
+  resize backstop clamp now preserves a Dock-level placement, matching the shared `clamp()`.
+  Thanks @Striker72rus (Sergey Dontsov).
+
+## [1.2.0] - 2026-07-19
 
 ### Added
 - **Notifications & sound settings** — a new "Notifications & sound" section in Settings that finally
@@ -49,6 +56,7 @@ Early patch releases following the initial launch. See the
     prompts, plus token/cost stats via `ccusage`.
 - Full localization: English, Русский, Español, Deutsch, Français.
 
+[1.2.1]: https://github.com/hakkazuu/ccemaphore/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/hakkazuu/ccemaphore/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/hakkazuu/ccemaphore/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/hakkazuu/ccemaphore/compare/v1.0.1...v1.0.2

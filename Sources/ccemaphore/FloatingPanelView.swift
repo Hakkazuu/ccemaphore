@@ -189,15 +189,35 @@ struct FloatingPanelView: View {
     // MARK: - Settings screen (the "Настройки" tab)
 
     private var settingsScreen: some View {
+        // Every section collapses to just its (tappable) header — the Settings tab has a lot of options,
+        // so it opens compact and the user expands only what they need. State is remembered per section.
         VStack(spacing: 0) {
-            // "Виджет на экране" — the three on-screen widget controls (opacity / size / pin).
-            // No card: a mono section header (the app's native group idiom) opens it, and the controls
-            // sit flat on the same 12px gutter as every other row.
-            SettingsSectionHeader(label: L("widget.section"), first: true)
-            WidgetQuickSettingsView(settings: settings, embedded: true)
+            CollapsibleSection(id: "widget", label: L("widget.section"), first: true) {
+                WidgetQuickSettingsView(settings: settings, embedded: true)
+            }
+            CollapsibleSection(id: "notif", label: L("notif.section")) {
+                NotificationSettingsView(notif: NotificationSettings.shared)
+            }
+            CollapsibleSection(id: "app", label: L("settings.section.app")) {
+                appSectionBody
+            }
+            CollapsibleSection(id: "trusted", label: L("settings.trusted.section")) {
+                trustedSectionBody
+            }
+            CollapsibleSection(id: "remote", label: L("remote.menu.title")) {
+                RemoteHostsView(engine: engine, embedded: true)
+            }
+            CollapsibleSection(id: "diagnostics", label: L("settings.section.diagnostics")) {
+                diagnosticsSectionBody
+            }
+        }
+        .padding(.bottom, 10)
+        // Quit is intentionally NOT here — it lives in the menu-bar item (see `CcemaphoreApp`).
+    }
 
-            // General app settings — same flat rhythm under their own section header.
-            SettingsSectionHeader(label: L("settings.section.app"))
+    /// App settings rows (language + hook toggles). The collapsible wrapper supplies the section header.
+    private var appSectionBody: some View {
+        VStack(spacing: 0) {
             languageRow
             SettingsAppRow(
                 label: L("settings.hooks.title"),
@@ -232,14 +252,7 @@ struct FloatingPanelView: View {
                     engine.updateIDELogWatch()
                 }
             )
-
-            trustedSection
-            RemoteHostsView(engine: engine)
-
-            diagnosticsSection
         }
-        .padding(.bottom, 10)
-        // Quit is intentionally NOT here — it lives in the menu-bar item (see `CcemaphoreApp`).
     }
 
     // MARK: Diagnostics (log export)
@@ -248,9 +261,8 @@ struct FloatingPanelView: View {
     /// debugging. "Сохранить логи…" zips `~/Library/Logs/ccemaphore` via an NSSavePanel; "Показать в
     /// Finder" reveals the folder. (This save action existed in the old menu-bar build and was lost in
     /// the floating-panel rebuild — `LogExport` was still complete, just no longer wired to any UI.)
-    private var diagnosticsSection: some View {
+    private var diagnosticsSectionBody: some View {
         VStack(spacing: 0) {
-            SettingsSectionHeader(label: L("settings.section.diagnostics"))
             SettingsAppRow(
                 label: L("settings.saveLogs"),
                 subtitle: L("settings.saveLogs.subtitle"),
@@ -271,9 +283,8 @@ struct FloatingPanelView: View {
     /// The "Доверенные команды" section: a persistent list of tool/command patterns our permission hook
     /// auto-approves (no Cursor dialog, no ribbon). Review + remove existing entries and add new ones.
     /// Only meaningful when the permission hook is installed, so it's dimmed + noted when it isn't.
-    private var trustedSection: some View {
+    private var trustedSectionBody: some View {
         VStack(spacing: 0) {
-            SettingsSectionHeader(label: L("settings.trusted.section"))
             Text(engine.permissionHookInstalled ? L("settings.trusted.explainer") : L("settings.trusted.needHook"))
                 .font(.system(size: 10))
                 .foregroundStyle(DS.textTertiary)
@@ -471,11 +482,70 @@ struct SettingsSectionHeader: View {
                 .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                 .tracking(0.9)
                 .foregroundStyle(DS.textTertiary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)   // stay on one line; the hairline yields width
             DS.line.frame(height: 1)
         }
         .padding(.horizontal, 12)
         .padding(.top, first ? 12 : 18)
         .padding(.bottom, 8)
+    }
+}
+
+/// A settings section that collapses to just its header. The header row (chevron · mono label · hairline)
+/// is fully tappable; the expanded/collapsed state is per-section, persisted in `WidgetSettings`, and
+/// defaults to collapsed so the long Settings tab opens compact. The label is single-line and the hairline
+/// takes the remaining width, so a long title (or a longer translation) never wraps to two lines.
+private struct CollapsibleSection<Content: View>: View {
+    let id: String
+    let label: String
+    var first: Bool = false
+    /// Built lazily (only when expanded) so a collapsed section never constructs its subtree — e.g. the
+    /// notifications view's `CustomSounds.load()` doesn't run while that section is collapsed.
+    let content: () -> Content
+    @ObservedObject private var settings = WidgetSettings.shared
+    @State private var hovering = false
+
+    init(id: String, label: String, first: Bool = false, @ViewBuilder content: @escaping () -> Content) {
+        self.id = id
+        self.label = label
+        self.first = first
+        self.content = content
+    }
+
+    var body: some View {
+        let expanded = settings.isSectionExpanded(id)
+        VStack(spacing: 0) {
+            Button { settings.toggleSection(id) } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(DS.textTertiary)
+                        .frame(width: 9)
+                    Text(label)
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .tracking(0.9)
+                        .foregroundStyle(DS.textTertiary)
+                        .textCase(.uppercase)   // uniform CAPS across sections (source strings mix cases)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    DS.line.frame(height: 1)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(hovering ? DS.hoverRow : .clear)
+                        .padding(.horizontal, 6)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .padding(.top, first ? 4 : 10)   // inter-section gap, outside the tappable/highlighted row
+
+            if expanded { content() }
+        }
     }
 }
 

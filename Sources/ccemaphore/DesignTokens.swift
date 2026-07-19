@@ -105,7 +105,7 @@ enum DS {
         static let housingRadius: CGFloat = 14
         static let ribbonWidth:  CGFloat = 300
         static let ribbonRadius: CGFloat = 15
-        static let panelWidth:   CGFloat = 300
+        static let panelWidth:   CGFloat = 360
         static let panelRadius:  CGFloat = 16
         /// The ribbon body tucks under the tower by this much so the seam is hidden (§6.1).
         static let ribbonOverlap: CGFloat = 15

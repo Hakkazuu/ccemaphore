@@ -23,6 +23,11 @@
 		9C7CFDE5A301D81705A1D614 /* RemoteTranscriptPoller.swift in Sources */ = {isa = PBXBuildFile; fileRef = D34B4392D2726D83533F0ADC /* RemoteTranscriptPoller.swift */; };
 		A100000000000000000000B1 /* DesignTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A1 /* DesignTokens.swift */; };
 		A100000000000000000000B2 /* WidgetSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A2 /* WidgetSettings.swift */; };
+		A1000000000000000000F201 /* SoundCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000F101 /* SoundCatalog.swift */; };
+		A1000000000000000000F202 /* SoundImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000F102 /* SoundImporter.swift */; };
+		A1000000000000000000F203 /* SoundPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000F103 /* SoundPlayer.swift */; };
+		A1000000000000000000F204 /* NotificationSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000F104 /* NotificationSettings.swift */; };
+		A1000000000000000000F205 /* NotificationSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000F105 /* NotificationSettingsView.swift */; };
 		A100000000000000000000B3 /* LightTowerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A3 /* LightTowerView.swift */; };
 		A100000000000000000000B4 /* PermissionRibbonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A4 /* PermissionRibbonView.swift */; };
 		A100000000000000000000B5 /* FloatingPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000A5 /* FloatingPanelView.swift */; };
@@ -72,6 +77,11 @@
 		97349E4863FFAA0135D389EE /* TranscriptWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptWatcher.swift; sourceTree = "<group>"; };
 		A100000000000000000000A1 /* DesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
 		A100000000000000000000A2 /* WidgetSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetSettings.swift; sourceTree = "<group>"; };
+		A1000000000000000000F101 /* SoundCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundCatalog.swift; sourceTree = "<group>"; };
+		A1000000000000000000F102 /* SoundImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundImporter.swift; sourceTree = "<group>"; };
+		A1000000000000000000F103 /* SoundPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundPlayer.swift; sourceTree = "<group>"; };
+		A1000000000000000000F104 /* NotificationSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationSettings.swift; sourceTree = "<group>"; };
+		A1000000000000000000F105 /* NotificationSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationSettingsView.swift; sourceTree = "<group>"; };
 		A100000000000000000000A3 /* LightTowerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LightTowerView.swift; sourceTree = "<group>"; };
 		A100000000000000000000A4 /* PermissionRibbonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionRibbonView.swift; sourceTree = "<group>"; };
 		A100000000000000000000A5 /* FloatingPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingPanelView.swift; sourceTree = "<group>"; };
@@ -132,6 +142,11 @@
 				599C6A9F5D48FDDB83C5839B /* AppDelegate.swift */,
 				A100000000000000000000A1 /* DesignTokens.swift */,
 				A100000000000000000000A2 /* WidgetSettings.swift */,
+				A1000000000000000000F101 /* SoundCatalog.swift */,
+				A1000000000000000000F102 /* SoundImporter.swift */,
+				A1000000000000000000F103 /* SoundPlayer.swift */,
+				A1000000000000000000F104 /* NotificationSettings.swift */,
+				A1000000000000000000F105 /* NotificationSettingsView.swift */,
 				A100000000000000000000A3 /* LightTowerView.swift */,
 				A100000000000000000000A4 /* PermissionRibbonView.swift */,
 				A100000000000000000000A5 /* FloatingPanelView.swift */,
@@ -251,6 +266,11 @@
 				E4636A56586E6399F30D796B /* AppDelegate.swift in Sources */,
 				A100000000000000000000B1 /* DesignTokens.swift in Sources */,
 				A100000000000000000000B2 /* WidgetSettings.swift in Sources */,
+				A1000000000000000000F201 /* SoundCatalog.swift in Sources */,
+				A1000000000000000000F202 /* SoundImporter.swift in Sources */,
+				A1000000000000000000F203 /* SoundPlayer.swift in Sources */,
+				A1000000000000000000F204 /* NotificationSettings.swift in Sources */,
+				A1000000000000000000F205 /* NotificationSettingsView.swift in Sources */,
 				A100000000000000000000B3 /* LightTowerView.swift in Sources */,
 				A100000000000000000000B4 /* PermissionRibbonView.swift in Sources */,
 				A100000000000000000000B5 /* FloatingPanelView.swift in Sources */,
@@ -348,7 +368,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = VX8B5Q99JH;
@@ -364,7 +384,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.2.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -432,7 +452,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = VX8B5Q99JH;
@@ -454,7 +474,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.2.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

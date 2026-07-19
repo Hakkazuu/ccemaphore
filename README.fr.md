@@ -23,6 +23,8 @@ agent travaille, a terminé ou a besoin de vous.
 Signé et notarié par Apple. Glissez-le dans **Applications** et lancez-le — sans avertissement
 Gatekeeper. Nécessite **macOS 13 ou ultérieur**. [Étapes d'installation complètes ↓](#installation)
 
+📄 **[Journal des modifications](CHANGELOG.md)** — les nouveautés de chaque version.
+
 ```
 🟡  au moins une session travaille
 🟢  aucune ne travaille — tout s'est terminé proprement

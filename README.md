@@ -23,6 +23,8 @@ finished, or needs you.
 Signed & notarized by Apple. Drag it into **Applications** and launch — no Gatekeeper warnings.
 Requires **macOS 13 or later**. [Full install steps ↓](#install)
 
+📄 **[Changelog](CHANGELOG.md)** — what's new in each version.
+
 ```
 🟡  at least one session is working
 🟢  none working — everything finished cleanly

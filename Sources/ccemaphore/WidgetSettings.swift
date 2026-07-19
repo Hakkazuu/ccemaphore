@@ -79,6 +79,12 @@ final class WidgetSettings: ObservableObject {
     /// turning it off is the escape hatch if an IDE update breaks the format. See `IDELogWatcher`.
     @Published var watchIDELog: Bool { didSet { d.set(watchIDELog, forKey: K.watchIDELog) } }
 
+    /// Which settings sections are currently EXPANDED (by section id). Default empty = every section
+    /// collapsed, so the (long) Settings tab opens compact and the user expands only what they need. The
+    /// choice is remembered across launches. Storing the *expanded* set (not collapsed) means a brand-new
+    /// section added in a future build starts collapsed automatically.
+    @Published private var expandedSections: Set<String> { didSet { d.set(Array(expandedSections), forKey: K.expandedSections) } }
+
     private let d = UserDefaults.standard
     /// displayId → stored origin. This is `panel.frame.origin`, i.e. an ABSOLUTE global-coordinate
     /// point (not screen-local) — the controller never subtracts the screen's own origin before
@@ -95,6 +101,7 @@ final class WidgetSettings: ObservableObject {
         static let positions = "widget.positions"
         static let lastDisplayID = "widget.lastDisplayID"
         static let watchIDELog = "widget.watchIDELog"
+        static let expandedSections = "settings.expandedSections"
     }
 
     private init() {
@@ -108,8 +115,17 @@ final class WidgetSettings: ObservableObject {
         displayMode = DisplayMode(rawValue: d.string(forKey: K.displayMode) ?? "") ?? .summary
         orientation = Orientation(rawValue: d.string(forKey: K.orientation) ?? "") ?? .vertical
         watchIDELog = d.object(forKey: K.watchIDELog) as? Bool ?? true   // default ON (see doc above)
+        expandedSections = Set(d.stringArray(forKey: K.expandedSections) ?? [])   // default: all collapsed
         positions = Self.decodePositions(d.data(forKey: K.positions))
         lastDisplayID = d.string(forKey: K.lastDisplayID)
+    }
+
+    // MARK: - Settings-section collapse state
+
+    func isSectionExpanded(_ id: String) -> Bool { expandedSections.contains(id) }
+
+    func toggleSection(_ id: String) {
+        if expandedSections.contains(id) { expandedSections.remove(id) } else { expandedSections.insert(id) }
     }
 
     // MARK: - Per-display position

@@ -17,6 +17,7 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
 
     private let engine = StateEngine.shared
     private let settings = WidgetSettings.shared
+    private let notif = NotificationSettings.shared
 
     private var lightPanel: LightPanel?
     private var expandedPanel: NSPanel?
@@ -71,25 +72,51 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     private var savedVerticalMode: VerticalMode = .center
 
     /// New-alert detector + sound: the ribbon at the light IS the notification now (toasts are gone), so
-    /// a newly-appearing request / question / completion chimes with our bundled alert sound. `alertedIds`
-    /// holds what's currently alerting (live request ids + question-attention session ids + `done-<sid>`
-    /// completion ids). `alertDepartedAt` remembers when each id last LEFT that set, so an id that merely
-    /// flickers out and back within `alertReChimeCooldown` is NOT re-chimed — the guard against the
-    /// click→optimistic-clear→disk-reread→red round-trip (fix 3a removes its source) and any transient
-    /// state flap. A handed-off permission (`permission-native`) is not a separate id — it already chimed
-    /// as a live request. Cooldown is set-membership based for present ids, so tick cadence can't re-arm it.
+    /// a newly-appearing request / question / completion chimes with the sound configured for its type
+    /// (`NotificationSettings` → `SoundPlayer`). `alertedIds` holds what's currently alerting (live request
+    /// ids + question-attention session ids + `done-<sid>` completion ids). `alertDepartedAt` remembers
+    /// when each id last LEFT that set, so an id that merely flickers out and back within
+    /// `alertReChimeCooldown` is NOT re-chimed — the guard against the click→optimistic-clear→disk-reread→
+    /// red round-trip (fix 3a removes its source) and any transient state flap. A handed-off permission
+    /// (`permission-native`) is not a separate id — it already chimed as a live request. Cooldown is
+    /// set-membership based for present ids, so tick cadence can't re-arm it.
     private var alertedIds: Set<String> = []
     private var alertDepartedAt: [String: Date] = [:]
     private let alertReChimeCooldown: TimeInterval = 2.0
-    private lazy var permSound: NSSound? = {
-        guard let url = Bundle.main.url(forResource: "ccemaphore_notification", withExtension: "aiff") else { return nil }
-        return NSSound(contentsOf: url, byReference: true)
-    }()
 
-    /// The ribbon is on screen — for a live broker request OR an attention item (native prompt / question).
-    /// It owns the light: the hover panel is suppressed and the light forced fully opaque while it shows.
+    // MARK: - Per-type visibility gate
+    //
+    // The user can hide a notification TYPE's ribbon (Завершение / Запрос разрешения / Вопрос агента) —
+    // `NotificationSettings.effectiveShow`. A hidden type must not show its ribbon, must not chime, AND
+    // must not let the light be "owned" by a ribbon nobody can see. So every consumer (hasRibbon, the
+    // chime, and — via the same predicate — `LightRootView`) derives from these VISIBLE subsets rather
+    // than the raw engine arrays. Hiding a ribbon never changes the traffic-light COLOUR: that stays
+    // driven by the session state counts (a hidden permission still turns the light red), only the
+    // in-widget toast + its sound are suppressed.
+
+    /// Live broker decisions, unless the permission type is hidden.
+    private var visibleDecisions: [PermissionBroker.PendingRequest] {
+        notif.effectiveShow(.permission) ? engine.pendingRequests : []
+    }
+    /// Native-prompt attention items, each gated by its own type (permission handoff vs. question).
+    private var visibleAttention: [AttentionItem] {
+        engine.attentionSessions.filter { a in
+            switch a.kind {
+            case .permission: return notif.effectiveShow(.permission)
+            case .question:   return notif.effectiveShow(.question)
+            }
+        }
+    }
+    /// Green completion notices, unless the done type is hidden.
+    private var visibleCompletions: [CompletionNotice] {
+        notif.effectiveShow(.done) ? engine.completionNotices : []
+    }
+
+    /// The ribbon is on screen — for a live broker request OR an attention item (native prompt / question)
+    /// OR a completion notice — that is NOT hidden by the user's per-type visibility settings. It owns the
+    /// light: the hover panel is suppressed and the light forced fully opaque while it shows.
     private var hasRibbon: Bool {
-        !engine.pendingRequests.isEmpty || !engine.attentionSessions.isEmpty || !engine.completionNotices.isEmpty
+        !visibleDecisions.isEmpty || !visibleAttention.isEmpty || !visibleCompletions.isEmpty
     }
 
     // MARK: - Lifecycle
@@ -100,6 +127,11 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
             .sink { [weak self] in DispatchQueue.main.async { self?.applyWindowState() } }
             .store(in: &cancellables)
         engine.objectWillChange
+            .sink { [weak self] in DispatchQueue.main.async { self?.applyWindowState() } }
+            .store(in: &cancellables)
+        // Re-gate the ribbon (a type's visibility may have flipped) and re-derive the chime when the
+        // notification/sound settings change.
+        notif.objectWillChange
             .sink { [weak self] in DispatchQueue.main.async { self?.applyWindowState() } }
             .store(in: &cancellables)
         applyWindowState()
@@ -182,7 +214,7 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     }
 
     private func buildLightPanel() {
-        let root = LightRootView(engine: engine, settings: settings)
+        let root = LightRootView(engine: engine, settings: settings, notif: notif)
         let panel = LightPanel(contentRect: NSRect(x: 0, y: 0, width: 40, height: 90),
                                styleMask: [.borderless, .nonactivatingPanel],
                                backing: .buffered, defer: false)
@@ -219,13 +251,21 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         // / `togglePinnedPanel`).
         if hasRibbon, expanded, !forcedOpen, !pinnedOpen { hideExpanded() }
         // The ribbon IS the notification now: chime when a genuinely NEW live request, question, or
-        // completion appears. An id that merely flickered out and back within `alertReChimeCooldown`
-        // (a transient state flap, or the pre-fix-3a click round-trip) is NOT re-chimed; a continuously
-        // present id never re-chimes because the guard is set membership, not an age comparison.
+        // completion appears — with the sound + volume configured for that TYPE. An id that merely
+        // flickered out and back within `alertReChimeCooldown` (a transient state flap, or the pre-fix-3a
+        // click round-trip) is NOT re-chimed; a continuously present id never re-chimes because the guard
+        // is set membership, not an age comparison.
+        //
+        // Dedup bookkeeping keys off the RAW (ungated) engine ids, NOT the per-type visible subsets: a
+        // visibility toggle must not read as the alert departing and returning, else hiding then re-showing
+        // a type would re-chime a still-pending alert. Per-type visibility is applied only at PLAYBACK — a
+        // fresh id whose type is hidden updates the baseline but stays silent. A handed-off permission-
+        // native attention is still not chimed (it already chimed as a live decision).
         let now = Date()
-        let alerts = Set(engine.pendingRequests.map(\.requestId))
-            .union(engine.attentionSessions.filter { $0.kind == .question }.map(\.id))
-            .union(engine.completionNotices.map { "done-\($0.id)" })
+        let rawDecisionIds = Set(engine.pendingRequests.map(\.requestId))
+        let rawQuestionIds = Set(engine.attentionSessions.filter { $0.kind == .question }.map(\.id))
+        let rawDoneIds = Set(engine.completionNotices.map { "done-\($0.id)" })
+        let alerts = rawDecisionIds.union(rawQuestionIds).union(rawDoneIds)
         let appeared = alerts.subtracting(alertedIds)
         for id in alertedIds.subtracting(alerts) { alertDepartedAt[id] = now }   // record departures for the guard
         let fresh = appeared.filter { id in
@@ -233,8 +273,17 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
             return now.timeIntervalSince(left) > alertReChimeCooldown           // gone long enough → a new episode
         }
         if !fresh.isEmpty {
-            permSound?.stop(); permSound?.play()
-            Log.watcher.info("chime new=\(fresh.count) [\(fresh.map { String($0.prefix(14)) }.sorted().joined(separator: ","))]")
+            // One sound per tick: the most action-demanding type that is BOTH fresh AND currently shown
+            // wins (permission > question > done) — a hidden type is silent, and a needs-you alert is
+            // never masked by a calm "done".
+            let freshPermission = notif.effectiveShow(.permission) && fresh.contains(where: rawDecisionIds.contains)
+            let freshQuestion = notif.effectiveShow(.question) && fresh.contains(where: rawQuestionIds.contains)
+            let freshDone = notif.effectiveShow(.done) && fresh.contains(where: rawDoneIds.contains)
+            let type: NotifType? = freshPermission ? .permission : freshQuestion ? .question : freshDone ? .done : nil
+            if let type {
+                SoundPlayer.shared.play(notif.effectiveSound(type), volume: notif.effectiveVolume(type))
+                Log.watcher.info("chime type=\(type.rawValue) new=\(fresh.count) [\(fresh.map { String($0.prefix(14)) }.sorted().joined(separator: ","))]")
+            }
         } else if !appeared.isEmpty {
             Log.watcher.debug("chime suppressed (flicker) [\(appeared.map { String($0.prefix(14)) }.sorted().joined(separator: ","))]")
         }
@@ -277,6 +326,10 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         // Pinned open (menu-bar right-click) bypasses hover entirely — no ribbon-preemption check, no
         // mouse-leave collapse timer. Only `togglePinnedPanel()` closes it.
         if pinnedOpen { return }
+        // A modal we own (the custom-sound NSOpenPanel, opened from Настройки) is up. The picker sits over
+        // neither the light nor the management panel, so the mouse-leave logic below would collapse the
+        // settings panel out from under the import flow. Freeze hover until the modal closes.
+        if NSApp.modalWindow != nil { return }
         // While the ribbon is on screen it owns the light — suppress the hover panel. Skipped when the
         // user explicitly force-opened it (menu-bar "Open panel"): normal mouse-leaves-the-panel
         // collapse still applies below, just not this auto-collapse-because-a-request-arrived path.
@@ -626,12 +679,17 @@ final class ManagementPanel: NSPanel {
 struct LightRootView: View {
     @ObservedObject var engine: StateEngine
     @ObservedObject var settings: WidgetSettings
+    /// Per-type notification visibility (Завершение / Запрос разрешения / Вопрос агента). Gates which
+    /// ribbons render, using the SAME `effectiveShow` predicate as `FloatingWidgetController` so the view
+    /// and the controller's `hasRibbon`/chime can never disagree about what's on screen.
+    @ObservedObject var notif: NotificationSettings
 
     @State private var ribbonIndex = 0
 
-    /// LIVE broker requests (actionable) — the red decision items.
+    /// LIVE broker requests (actionable) — the red decision items. Hidden when the permission type is off.
     private var decisionItems: [RibbonItem] {
-        engine.pendingRequests.map { req in
+        guard notif.effectiveShow(.permission) else { return [] }
+        return engine.pendingRequests.map { req in
             let h = engine.hostInfo(for: req.sessionId)
             let session = engine.sessions.first { $0.id == req.sessionId }
             return RibbonItem(id: req.requestId,
@@ -648,8 +706,14 @@ struct LightRootView: View {
         }
     }
     /// Chats parked on a native prompt / question the user answers in Cursor — the red attention items.
+    /// Each is gated by its own type: a permission handoff by `.permission`, a question by `.question`.
     private var attentionItems: [RibbonItem] {
-        engine.attentionSessions.map { a in
+        engine.attentionSessions.filter { a in
+            switch a.kind {
+            case .permission: return notif.effectiveShow(.permission)
+            case .question:   return notif.effectiveShow(.question)
+            }
+        }.map { a in
             let h = engine.hostInfo(for: a.id)
             let session = engine.sessions.first { $0.id == a.id }
             return RibbonItem(id: a.id, kind: .attention(a.kind), sessionId: a.id, cwd: a.cwd,
@@ -660,9 +724,10 @@ struct LightRootView: View {
                        remoteHostId: session?.remoteHostId)
         }
     }
-    /// Transient GREEN "chat finished" notices.
+    /// Transient GREEN "chat finished" notices. Hidden when the done type is off.
     private var completionItems: [RibbonItem] {
-        engine.completionNotices.map { n in
+        guard notif.effectiveShow(.done) else { return [] }
+        return engine.completionNotices.map { n in
             let h = engine.hostInfo(for: n.id)
             return RibbonItem(id: "done-\(n.id)", kind: .completed, sessionId: n.id, cwd: n.cwd,
                        project: n.project, branch: n.branch, command: nil,

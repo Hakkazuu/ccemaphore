@@ -23,6 +23,8 @@ trabajando, ha terminado o te necesita.
 Firmado y notarizado por Apple. Arrástralo a **Aplicaciones** y ábrelo — sin avisos de Gatekeeper.
 Requiere **macOS 13 o posterior**. [Pasos de instalación completos ↓](#instalación)
 
+📄 **[Registro de cambios](CHANGELOG.md)** — novedades de cada versión.
+
 ```
 🟡  al menos una sesión está trabajando
 🟢  ninguna trabajando — todo terminó correctamente

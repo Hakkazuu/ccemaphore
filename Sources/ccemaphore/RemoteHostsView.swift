@@ -16,6 +16,9 @@ import SwiftUI
 struct RemoteHostsView: View {
     @ObservedObject var engine: StateEngine
     @ObservedObject private var loc = LocalizationManager.shared
+    /// When hosted inside a collapsible settings section, the wrapper draws the section header, so this
+    /// view skips its own (mirrors `WidgetQuickSettingsView.embedded`).
+    var embedded: Bool = false
 
     @State private var newLabel = ""
     @State private var newHostname = ""
@@ -26,7 +29,7 @@ struct RemoteHostsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SettingsSectionHeader(label: L("remote.menu.title"))
+            if !embedded { SettingsSectionHeader(label: L("remote.menu.title")) }
             Text(L("remote.explainer"))
                 .font(.system(size: 10))
                 .foregroundStyle(DS.textTertiary)

@@ -23,6 +23,8 @@ fertig ist oder dich braucht.
 Von Apple signiert & notarisiert. Ziehe sie in **Programme** und starte sie – ohne Gatekeeper-Warnungen.
 Erfordert **macOS 13 oder neuer**. [Vollständige Installationsschritte ↓](#installation)
 
+📄 **[Änderungsprotokoll](CHANGELOG.md)** — was in jeder Version neu ist.
+
 ```
 🟡  mindestens eine Sitzung arbeitet
 🟢  keine arbeitet — alles sauber abgeschlossen

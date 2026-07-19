@@ -633,11 +633,14 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         }
         // Backstop clamp so a ribbon TALLER than the room can't push the body off-screen — NO edge inset
         // (flush allowed, matching `clamp`), so a light parked flush at an edge isn't nudged when the
-        // ribbon toggles. X uses the full screen frame (Dock-level parking survives); Y excludes the menu
-        // bar (visibleFrame). For a normal-height ribbon the vertical mode already keeps it on-screen, so
-        // this only ever bites the pathological too-tall case.
+        // ribbon toggles. X uses the full screen frame (Dock-level parking survives); Y's LOWER bound must
+        // also use the full frame (not `visibleFrame.minY`, which excludes the Dock) — using visibleFrame
+        // there reintroduced the "light jumps above the Dock" bug: it fired on every resize (not just the
+        // pathological too-tall case the comment describes), overriding `.bottom` mode's `savedBottom` pin
+        // the instant a permission ribbon made the frame taller. Only the UPPER bound excludes the menu bar
+        // (`visibleFrame.maxY`), matching `clamp()`'s asymmetric screenFrame/visibleFrame split above.
         origin.x = min(max(screen.frame.minX, origin.x), screen.frame.maxX - f.width)
-        origin.y = min(max(screen.visibleFrame.minY, origin.y), screen.visibleFrame.maxY - f.height)
+        origin.y = min(max(screen.frame.minY, origin.y), screen.visibleFrame.maxY - f.height)
         if origin != f.origin {
             adjustingFrame = true
             panel.setFrameOrigin(origin)

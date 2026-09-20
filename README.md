@@ -1,3 +1,5 @@
+
+
 # ccemaphore
 
 **English** · [Русский](README.ru.md) · [Español](README.es.md) · [Deutsch](README.de.md) · [Français](README.fr.md)
@@ -136,6 +138,8 @@ To assemble a local (unsigned) `.app` for quick testing:
 ```sh
 Scripts/package_app.sh    # → build/ccemaphore.app  (Release build via xcodebuild)
 ```
+
+For a local run, ad-hoc sign the built copy first: `codesign --force --options runtime --sign - build/ccemaphore.app`.
 
 App Sandbox is **off** (required to read `~/.claude`), so distribution is outside the Mac App Store.
 Issues and pull requests are welcome. Signed releases are cut by the maintainer via GitHub Actions —

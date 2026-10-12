@@ -1,7 +1,20 @@
-# Build, sign, notarize and publish a ccemaphore DMG on every `v*` tag.
+# Build, sign, notarize and publish a ccemaphore release: the DMG plus the signed Sparkle appcast that
+# every installed copy polls for in-app updates.
 #
-# Setup, required secrets, and the security model are documented in docs/RELEASING.md.
-# Cut a release:  git tag v1.0.0 && git push origin v1.0.0
+# Version bump, tags, secrets, keys, testing an update and the security model: docs/RELEASING.md.
+# The logic lives in Scripts/release/*.sh; after changing anything there, run Scripts/release/selftest.sh.
+#
+# A stable tag must be on main, so push main first:
+#   git push origin main
+# A stable release becomes "latest" and is offered to every user:
+#   git tag v1.3.0 && git push origin v1.3.0
+# A prerelease is never "latest"; it is for update testing:
+#   git tag v1.3.0-rc.1 && git push origin v1.3.0-rc.1
+#
+# Any other v* tag fails in preflight; a tag without the "v" starts no run at all. Flow: preflight (no
+# secrets) → approval of the `release` environment → release (build, sign, notarize, appcast, publish)
+# → verify-live (no secrets). Before moving or re-pushing a tag, cancel or reject every run for it that
+# is still waiting or running (the release job refuses to publish a commit its tag no longer points at).
 
 name: Release
 
@@ -10,128 +23,336 @@ on:
     tags:
       - "v*"
 
+# Least privilege; only the release job may write (it creates the GitHub Release).
 permissions:
-  contents: write # needed to create the GitHub Release and upload the DMG
+  contents: read
+
+# One release at a time: two runs must not both extend the same "previous" feed. A running release is
+# never cancelled. Behind it (while it runs or waits for approval) only ONE run waits: GitHub cancels
+# that waiting run as soon as another tag is pushed. So push one tag at a time, and re-run a replaced
+# run if you still want it. A stale run for a moved tag stops at the tag check in `release`.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  release:
-    # ccemaphore needs Xcode 26 — use a runner image that ships it (macos-26 does;
-    # bump this if GitHub renames the image). The step below picks the newest Xcode present.
-    runs-on: macos-26
-    # Bind the signing secrets to a protected Environment. Configure it under
-    # Settings ▸ Environments ▸ "release" with "Required reviewers" so every signed
-    # build pauses for your manual approval before the secrets are exposed — even a
-    # tag push can't sign without you clicking Approve. See docs/RELEASING.md.
-    environment: release
-    env:
-      SCHEME: ccemaphore
-      APP_NAME: ccemaphore
-      PRODUCT: ccemaphore.app
+  preflight:
+    name: Preflight (no secrets)
+    # Runs before the approval gate, so a malformed tag, a forgotten version / build bump, a missing
+    # CHANGELOG section or the SUPublicEDKey placeholder fails here instead of after you approve.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      short_version: ${{ steps.check.outputs.short_version }}
+      build: ${{ steps.check.outputs.build }}
+      is_prerelease: ${{ steps.check.outputs.is_prerelease }}
+      make_latest: ${{ steps.check.outputs.make_latest }}
+      dmg_name: ${{ steps.check.outputs.dmg_name }}
     steps:
-      # Third-party actions are pinned to a full commit SHA (not a moving tag) so a
-      # compromised tag can't inject code into this secret-bearing run. Comments note
-      # the human-readable version; bump both together via `gh api .../git/ref/tags/<v>`.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Third-party actions are pinned to a full commit SHA (the comment names the version) so a moved
+      # tag can't inject code. Bump: gh api repos/<owner>/<action>/commits/refs/tags/<version> --jq .sha
+      # (resolves annotated and lightweight tags alike to the commit).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0 # a stable tag must be on main (ancestry check)
+          persist-credentials: false
 
-      - name: Select the newest installed Xcode
+      - name: Check tag, versions, Info.plist, CHANGELOG, package pins and everything already published
+        id: check
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }} # read-only listing of releases (their appcasts' build numbers)
+        run: bash Scripts/release/check-version.sh --tag "$TAG" --require-on-main
+
+      - name: Extract the release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: bash Scripts/release/extract-notes.sh "$VERSION" "$RUNNER_TEMP/notes/notes.md"
+
+      # Also lets the reviewer read the exact notes (and the run summary) before approving.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes/notes.md
+          if-no-files-found: error
+          overwrite: true # "Re-run all jobs" uploads it again
+          retention-days: 30
+
+  release:
+    name: Build, sign, notarize, publish
+    needs: preflight
+    # ccemaphore needs Xcode 26+; macos-26 ships it (bump if GitHub renames the image). The newest
+    # installed RELEASED Xcode is selected below, never a beta or a release candidate.
+    runs-on: macos-26
+    timeout-minutes: 120
+    # The signing, notarization and EdDSA secrets live in the protected `release` environment: this job
+    # waits for its required reviewer before any of them is decrypted (docs/RELEASING.md).
+    environment: release
+    permissions:
+      contents: write # create the GitHub Release and upload its assets
+    env:
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+      SHORT_VERSION: ${{ needs.preflight.outputs.short_version }}
+      BUILD: ${{ needs.preflight.outputs.build }}
+      DMG_NAME: ${{ needs.preflight.outputs.dmg_name }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # A run keeps the commit it was started for (GITHUB_SHA) while it waits for approval, and when it
+      # is re-run - even after its tag was moved or deleted. It must never build and publish that old
+      # commit under the tag. Checked again right before publishing (the build takes a while).
+      - name: Check that the tag still points at this run's commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          source Scripts/release/lib.sh
+          assert_tag_at "$TAG" "$GITHUB_SHA"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes
+
+      - name: Select the newest released Xcode
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/notes/notes.md"
+          # Never a beta or a release candidate (Xcode_26.6_Release_Candidate.app): what ships must be built
+          # by a released toolchain. The runner images also install a beta under version-named SYMLINKS
+          # (Xcode_26.5.app -> Xcode_26.5_beta_2.app), so filter the real paths, never the names in the listing.
+          XC="$(for x in /Applications/Xcode_*.app; do (cd "$x" 2>/dev/null && pwd -P) || true; done |
+            { grep -viE 'beta|candidate' || true; } | sort -uV | tail -1)"
+          if [[ -z "$XC" ]]; then
+            echo "::error::no released Xcode found in /Applications"
+            ls -la /Applications
+            exit 1
+          fi
           echo "Selecting $XC"
           sudo xcode-select -switch "$XC"
           xcodebuild -version
 
-      - name: Derive version from tag
-        id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Import Developer ID signing certificate
-        env:
-          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          CERT_PATH="$RUNNER_TEMP/cert.p12"
-          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
-
-          echo "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security import "$CERT_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
-          # Prepend our keychain to the search list so codesign/xcodebuild find the identity.
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
-
-          # Resolve the exact identity name (e.g. "Developer ID Application: Name (TEAMID)").
-          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
-          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-          echo "Using identity: $IDENTITY"
-
-      - name: Build Release (unsigned)
+      - name: Build Release (unsigned, packages pinned by Package.resolved)
         run: |
           set -euo pipefail
           xcodebuild \
             -project ccemaphore.xcodeproj \
-            -scheme "$SCHEME" \
+            -scheme ccemaphore \
             -configuration Release \
+            -destination 'generic/platform=macOS' \
             -derivedDataPath "$RUNNER_TEMP/dd" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" \
+            -onlyUsePackageVersionsFromResolvedFile \
             CODE_SIGNING_ALLOWED=NO \
             build
-          cp -R "$RUNNER_TEMP/dd/Build/Products/Release/$PRODUCT" "$RUNNER_TEMP/$PRODUCT"
+          mkdir -p "$RUNNER_TEMP/out"
+          ditto "$RUNNER_TEMP/dd/Build/Products/Release/ccemaphore.app" "$RUNNER_TEMP/out/ccemaphore.app"
+          # Sparkle's CLI tools come from the same checksum-pinned SPM artifact as the embedded framework.
+          # Checked now, not after signing and notarization (make-appcast.sh is the first to need them).
+          SPARKLE_BIN="$RUNNER_TEMP/spm/artifacts/sparkle/Sparkle/bin"
+          if [[ ! -x "$SPARKLE_BIN/generate_appcast" || ! -x "$SPARKLE_BIN/sign_update" ]]; then
+            echo "::error::Sparkle's generate_appcast / sign_update are missing in $SPARKLE_BIN"
+            ls -la "$SPARKLE_BIN" "$RUNNER_TEMP/spm/artifacts/sparkle" || true
+            exit 1
+          fi
+          {
+            echo "SPARKLE_BIN=$SPARKLE_BIN"
+            echo "APP=$RUNNER_TEMP/out/ccemaphore.app"
+            echo "DMG=$RUNNER_TEMP/out/$DMG_NAME"
+          } >>"$GITHUB_ENV"
 
-      - name: Codesign (Developer ID, Hardened Runtime)
+      - name: Check the built app (versions, updater keys, universal binary, Sparkle, notices)
+        run: bash Scripts/release/check-app.sh --app "$APP" --short-version "$SHORT_VERSION" --build "$BUILD"
+
+      - name: Import the Developer ID certificate into a temporary keychain
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          APP="$RUNNER_TEMP/$PRODUCT"
-          # Sign nested code first (frameworks/helpers), then the app bundle, deep + hardened runtime.
-          codesign --force --deep --options runtime --timestamp \
-            --sign "$SIGN_IDENTITY" "$APP"
-          codesign --verify --deep --strict --verbose=2 "$APP"
+          # A `base64 … | gh secret set` whose base64 failed stores an empty secret; say so plainly.
+          if [ -z "$BUILD_CERTIFICATE_BASE64" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::error::BUILD_CERTIFICATE_BASE64 or APPLE_TEAM_ID is empty; set it again (docs/RELEASING.md)"
+            exit 1
+          fi
+          CERT="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)" # throwaway: the keychain is deleted right after signing
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | base64 --decode >"$CERT"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm -f "$CERT"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Prepend our keychain to the search list so codesign finds the identity.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          echo "KEYCHAIN=$KEYCHAIN" >>"$GITHUB_ENV"
+          # Exactly one "Developer ID Application: … (APPLE_TEAM_ID)" identity, used by its SHA-1 hash so
+          # an old and a renewed certificate in the same .p12 can never be ambiguous.
+          MATCHES="$(security find-identity -v -p codesigning "$KEYCHAIN" |
+            grep -F '"Developer ID Application: ' | grep -F "($APPLE_TEAM_ID)\"" || true)"
+          COUNT="$(printf '%s' "$MATCHES" | grep -c . || true)"
+          if [ "$COUNT" != 1 ]; then
+            echo "::error::the .p12 must hold exactly one valid Developer ID Application identity for APPLE_TEAM_ID; found $COUNT"
+            security find-identity -v -p codesigning "$KEYCHAIN"
+            exit 1
+          fi
+          SIGN_IDENTITY="$(printf '%s\n' "$MATCHES" | awk '{ print $2 }')"
+          echo "SIGN_IDENTITY=$SIGN_IDENTITY" >>"$GITHUB_ENV"
+          echo "Signing identity: $SIGN_IDENTITY"
 
-      - name: Build DMG
-        id: dmg
-        run: |
-          set -euo pipefail
-          DMG="$RUNNER_TEMP/${APP_NAME}-${{ steps.ver.outputs.version }}.dmg"
-          # Plain hdiutil (no AppleScript window styling) — rock-solid on headless CI.
-          # Stage the .app plus an /Applications symlink so users drag-to-install.
-          STAGE="$RUNNER_TEMP/dmg-src"
-          rm -rf "$STAGE"; mkdir -p "$STAGE"
-          cp -R "$RUNNER_TEMP/$PRODUCT" "$STAGE/"
-          ln -s /Applications "$STAGE/Applications"
-          hdiutil create \
-            -volname "$APP_NAME" \
-            -srcfolder "$STAGE" \
-            -fs HFS+ \
-            -format UDZO \
-            -ov \
-            "$DMG"
-          # Sign the DMG itself so its origin is verifiable before mounting.
-          codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG"
-          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+      - name: Sign inside-out (Developer ID, Hardened Runtime, timestamp; team asserted)
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash Scripts/release/sign-app.sh --app "$APP" --identity "$SIGN_IDENTITY" --team "$APPLE_TEAM_ID"
 
-      - name: Notarize & staple
+      - name: Smoke-run the signed binary (--help, --update-status)
+        run: bash Scripts/release/smoke-test.sh --app "$APP"
+
+      - name: Notarize and staple the app
         env:
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash Scripts/release/notarize.sh --app "$APP"
+
+      - name: Build and sign the DMG (from the stapled app)
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash Scripts/release/make-dmg.sh --app "$APP" --out "$DMG" --identity "$SIGN_IDENTITY" --team "$APPLE_TEAM_ID"
+
+      - name: Notarize and staple the DMG
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash Scripts/release/notarize.sh --dmg "$DMG"
+
+      # Code signing is over: drop the keychain before the remaining steps (incl. the publish action).
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN" || true; fi
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Generate the signed appcast (after stapling — it signs the DMG's final bytes)
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          DMG="${{ steps.dmg.outputs.path }}"
-          xcrun notarytool submit "$DMG" \
-            --apple-id "$NOTARY_APPLE_ID" \
-            --password "$NOTARY_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-          xcrun stapler staple "$DMG"
-          xcrun stapler validate "$DMG"
+          source Scripts/release/lib.sh
+          # The live stable feed this release extends (none before the first release with the updater).
+          # Prereleases extend it too, but are published under their own tag and never become "latest".
+          PREV="$RUNNER_TEMP/prev-appcast.xml"
+          fetch_feed "$FEED_URL" "$PREV"
+          [ -f "$PREV" ] || PREV=""
+          bash Scripts/release/make-appcast.sh \
+            --dmg "$DMG" --build "$BUILD" --notes "$RUNNER_TEMP/notes/notes.md" \
+            --out-dir "$RUNNER_TEMP/appcast" --prev-feed "$PREV" \
+            --download-prefix "$DOWNLOAD_BASE/$TAG/" \
+            --release-page "https://github.com/$REPO_SLUG/releases/tag/$TAG" \
+            --sparkle-bin "$SPARKLE_BIN"
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - name: Verify the appcast (generate_appcast exits 0 even when it could not sign)
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          source Scripts/release/lib.sh
+          bash Scripts/release/verify-appcast.sh \
+            --feed "$RUNNER_TEMP/appcast/appcast.xml" --dmg "$DMG" \
+            --build "$BUILD" --short-version "$SHORT_VERSION" \
+            --url "$DOWNLOAD_BASE/$TAG/$DMG_NAME" \
+            --notes "$RUNNER_TEMP/notes/notes.md" --sparkle-bin "$SPARKLE_BIN"
+
+      # The tag may have been moved or deleted while this run was building and notarizing.
+      - name: Check again that the tag still points at this run's commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source Scripts/release/lib.sh
+          assert_tag_at "$TAG" "$GITHUB_SHA"
+
+      # DMG and appcast.xml in ONE call: a stable release is created as a draft, both assets are
+      # uploaded, then it is published and made "latest" at once, so the feed never points at a missing
+      # DMG. A prerelease is never "latest" (/releases/latest/download/appcast.xml is untouched); it is
+      # kept as a draft here and published by the next step, because the action would otherwise publish
+      # it BEFORE uploading (and that fails outright on a repository with immutable releases).
+      # target_commitish only matters if the tag vanished after the check above: GitHub then recreates
+      # it at the commit that was built, not at the default branch (it is ignored while the tag exists).
+      - name: Publish the GitHub Release (DMG + appcast.xml)
+        id: publish
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          files: ${{ steps.dmg.outputs.path }}
+          body_path: ${{ runner.temp }}/notes/notes.md
+          files: |
+            ${{ runner.temp }}/out/${{ needs.preflight.outputs.dmg_name }}
+            ${{ runner.temp }}/appcast/appcast.xml
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
+          draft: ${{ needs.preflight.outputs.is_prerelease }}
+          make_latest: ${{ needs.preflight.outputs.make_latest }}
+          target_commitish: ${{ github.sha }}
+
+      - name: Publish the prerelease (its assets are uploaded)
+        if: needs.preflight.outputs.is_prerelease == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.publish.outputs.id }}
+        run: gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -F prerelease=true --silent
+
+  verify-live:
+    name: Verify what installed copies will download
+    needs: [preflight, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the published feed and DMG and verify them against SUPublicEDKey
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SHORT_VERSION: ${{ needs.preflight.outputs.short_version }}
+          BUILD: ${{ needs.preflight.outputs.build }}
+          IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+        run: |
+          bash Scripts/release/verify-live.sh --tag "$TAG" --version "$VERSION" \
+            --short-version "$SHORT_VERSION" --build "$BUILD" --prerelease "$IS_PRERELEASE"
+
+      - name: What to do now
+        if: failure()
+        env:
+          TAG: ${{ github.ref_name }}
+          IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+        run: |
+          {
+            echo "### $TAG is published, but the live feed or DMG failed verification"
+            echo
+            echo "See the log above. A transient download error: re-run this job. Anything else: take $TAG"
+            echo "out of the update path, fix it, and release again with a higher build number."
+            echo
+            echo '```sh'
+            if [ "$IS_PRERELEASE" = true ]; then
+              echo "gh release delete $TAG --cleanup-tag --yes"
+            else
+              echo "gh release edit $TAG --prerelease"
+            fi
+            echo '```'
+            if [ "$IS_PRERELEASE" != true ]; then
+              echo
+              echo "\"latest\" then falls back to the previous stable release, and installed copies read that"
+              echo "release's appcast.xml. If it has none (1.3.0 is the first release with the updater), the"
+              echo "feed returns 404 until the next release: background checks fail quietly, *Check now*"
+              echo "reports an error, nothing else breaks."
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"

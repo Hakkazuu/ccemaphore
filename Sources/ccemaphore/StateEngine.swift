@@ -17,8 +17,25 @@ final class StateEngine: ObservableObject {
     /// removed with the toasts. Cheap to query, so it's refreshed on the tick.
     @Published private(set) var accessibilityGranted = false
     /// Non-nil when the last hook install/uninstall failed — surfaced in the popover so a failed
-    /// write to the user's settings.json is never a silent no-op.
-    @Published private(set) var lastHookError: String?
+    /// write to the user's settings.json is never a silent no-op. Kept unrendered (`message`), so the
+    /// note on screen follows a language switch.
+    @Published private(set) var lastHookError: HookOpError?
+
+    /// Why the last hook install / uninstall didn't happen.
+    enum HookOpError {
+        /// Refused: running from the mounted DMG / an App Translocation copy.
+        case blockedTransient
+        /// The `op.*` operation `opKey` threw `error`.
+        case failed(opKey: String, error: Error)
+
+        /// The panel text in the current language (a system error's own text follows the macOS language).
+        var message: String {
+            switch self {
+            case .blockedTransient: return L("settings.hooks.blockedTransient")
+            case .failed(let opKey, let error): return Lf("error.hookOp", L(opKey), error.localizedDescription)
+            }
+        }
+    }
     /// Interactive permission requests the broker hook is currently blocking on. Rendered in the popover
     /// as actionable [Allow once]/[Allow all]/[Deny] rows — a reliable surface that doesn't depend on
     /// catching a transient banner. Newest first.
@@ -54,8 +71,39 @@ final class StateEngine: ObservableObject {
     /// re-arm needed on install: FSEvents happily pre-arms on a nonexistent path (verified empirically)
     /// and fires once Claude Code first runs, so the tick + event re-checks flip this back promptly.
     @Published private(set) var claudeInstalled = true
+    /// False until `~/.codex` shows signs of Codex (live rollout tree or state DB). Drives the Codex
+    /// settings row's caption; nothing Codex-side is watched while false. Re-checked on the tick so a
+    /// first Codex run after launch starts the watchers without a restart.
+    @Published private(set) var codexInstalled = false
+    /// ChatGPT.app's own sidebar projects (`projects` + `project_roots`) — the seed for product groups.
+    @Published private(set) var codexProjects: [CodexProject] = []
+    /// Live (pid-alive) entries in Claude Code's session registry — the diagnostics row's count.
+    @Published private(set) var registryLiveCount = 0
+    /// Codex hooks (`~/.codex/hooks.json`): installed / permission hook / Codex's trust verdict for the
+    /// current file bytes (see `CodexHooksInstaller.trustState`). Trust is re-read on the tick because the
+    /// user grants it inside the ChatGPT app, outside our process.
+    @Published private(set) var codexHooksInstalled = false
+    @Published private(set) var codexPermissionHookInstalled = false
+    @Published private(set) var codexHooksTrust: CodexHooksInstaller.TrustState = .notInstalled
+    /// Effective product groups (manual ∪ Codex projects ∪ auto), recomputed on every render from the
+    /// live session set; `manualGroups` is the user-edited subset the settings list shows with ✕.
+    @Published private(set) var productGroups: [ProductGroup] = []
+    @Published private(set) var manualGroups: [ProductGroup] = []
 
     private let store = SessionStore()
+    private let codexStore = CodexSessionStore()
+    /// Latest Codex snapshot (mode A for Codex), folded into `render()` under `codex:<id>` keys.
+    private var codexSessions: [SessionInfo] = []
+    /// Each source has completed its first full scan. `render()` prunes the remembered expanded-row set
+    /// only after that: the launch-time renders triggered by the status/registry refreshes run BEFORE the
+    /// transcript ingest lands and would otherwise wipe the persisted set on every launch.
+    private var firstClaudeScanDone = false
+    private var firstCodexScanDone = false
+    /// Claude Code's own session registry, keyed by session id (see `SessionRegistryReader`).
+    private var registry: [String: RegistryEntry] = [:]
+    private var registryWatcher: TranscriptWatcher?
+    private var codexWatcher: TranscriptWatcher?
+    private var codexLockWatcher: TranscriptWatcher?
     private let usage = UsageProvider()
     private let remotePoller = RemoteTranscriptPoller()
     private let remotePermissionRelay = RemotePermissionRelay()
@@ -129,6 +177,7 @@ final class StateEngine: ObservableObject {
         // isolation, so apply(_:) runs on the main actor with no explicit hop.
         Task {
             let snap = await store.ingest(paths: SessionPath.enumerateTranscripts(root: root), now: Date())
+            firstClaudeScanDone = true
             apply(snap)
         }
         Task { await refreshUsage() }
@@ -146,9 +195,16 @@ final class StateEngine: ObservableObject {
         // an interleaved write would otherwise lose one side's change (last-writer-wins on the whole
         // document). healInstalled is refresh-only + cheap and no-ops when nothing changed, so running it
         // on-actor at launch is fine.
-        Task { @MainActor in
-            do { try HooksInstaller.healInstalled() }
-            catch { Log.settings.warn("hook self-heal skipped: \(error.localizedDescription)") }
+        // NOT from a transient location (the mounted DMG, an App Translocation copy): that would re-point
+        // every hook at a path that vanishes once the DMG is ejected (each hook then exits 127).
+        let transientLocation = UpdateSupport.isTransientLocation()
+        if transientLocation {
+            Log.settings.warn("hook self-heal skipped: running from a transient location (\(Bundle.main.bundlePath))")
+        } else {
+            Task { @MainActor in
+                do { try HooksInstaller.healInstalled() }
+                catch { Log.settings.warn("hook self-heal skipped: \(error.localizedDescription)") }
+            }
         }
         // Publish a presence beacon immediately (ready=false until the pending watcher is up) so the
         // blocking permission hook can tell we're alive even during these first startup moments.
@@ -169,6 +225,7 @@ final class StateEngine: ObservableObject {
         hooksInstalled = HooksInstaller.isInstalled()
         permissionHookInstalled = HooksInstaller.isPermissionHookInstalled()
         trustedCommands = TrustedCommands.load()
+        manualGroups = ProductGroups.loadManual()
         remoteHosts = RemoteHosts.load()
         accessibilityGranted = FocusResolver.accessibilityGranted
         let statusDir = HookHandler.statusDir
@@ -195,6 +252,33 @@ final class StateEngine: ObservableObject {
         // can now safely block on us. Flip the beacon to ready.
         presenceReady = true
         syncPresence()
+
+        // Claude Code's own session registry (busy / idle / waiting, names, entrypoint) — the primary
+        // state source when present (see `SessionRegistryReader`). FSEvents pre-arms on a nonexistent
+        // dir, so an older Claude Code that never writes it costs nothing and needs no re-arm.
+        Task { await refreshRegistry() }
+        let registryWatcher = TranscriptWatcher(path: SessionRegistryReader.dir) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.refreshRegistry() }
+        }
+        registryWatcher.start()
+        self.registryWatcher = registryWatcher
+
+        // Codex (ChatGPT.app / Codex CLI) — mode A over ~/.codex. Gated by the setting AND presence, so a
+        // machine without Codex never even starts the watchers.
+        refreshCodexPresence()
+        startCodexIfEnabled()
+        refreshCodexHookState()
+        // Self-heal the Codex hook commands too (binary moved) — refresh-only, and only when installed,
+        // because any byte changed in hooks.json makes Codex ask the user to trust it again. Never from a
+        // transient location (see the Claude heal above).
+        if (codexHooksInstalled || codexPermissionHookInstalled) && !transientLocation {
+            Task { @MainActor in
+                do { try CodexHooksInstaller.healInstalled() }
+                catch { Log.codex.warn("codex hook self-heal skipped: \(error.localizedDescription)") }
+                refreshCodexHookState()
+            }
+        }
 
         // Re-derive states as ACTIVE/STALE windows elapse even without new writes.
         stateTimer = Timer.scheduledTimer(withTimeInterval: Tuning.stateTick, repeats: true) { [weak self] _ in
@@ -310,7 +394,11 @@ final class StateEngine: ObservableObject {
     func forceRefresh() {
         let root = SessionPath.projectsRoot
         refreshClaudePresence()
+        refreshCodexPresence()
         Task {
+            registry = await Task.detached { SessionRegistryReader.readAll() }.value
+            registryLiveCount = registry.count
+            if codexWatcher != nil { await rescanCodex(render: false) }
             apply(await store.ingest(paths: SessionPath.enumerateTranscripts(root: root), now: Date()))
             await refreshUsage()
         }
@@ -337,6 +425,14 @@ final class StateEngine: ObservableObject {
     private func tick() async {
         accessibilityGranted = FocusResolver.accessibilityGranted   // reflect a just-granted permission
         refreshClaudePresence()
+        refreshCodexPresence()
+        if codexWatcher == nil { startCodexIfEnabled() }   // Codex appeared / was enabled since launch
+        if codexInstalled { refreshCodexHookState() }        // trust is granted inside the ChatGPT app
+        // Registry re-read on the tick too (not only on FSEvents): a dozen tiny files + a kill(0) each —
+        // cheap — and it's what notices a pid that died without Claude Code reaping its file.
+        registry = await Task.detached { SessionRegistryReader.readAll() }.value
+        registryLiveCount = registry.count
+        if codexWatcher != nil { codexSessions = await codexStore.reevaluate(now: Date()) }
         apply(await store.reevaluate(now: Date()))
     }
 
@@ -344,6 +440,106 @@ final class StateEngine: ObservableObject {
     private func refreshClaudePresence() {
         let exists = FileManager.default.fileExists(atPath: SessionPath.projectsRoot)
         if exists != claudeInstalled { claudeInstalled = exists }
+    }
+
+    private func refreshCodexPresence() {
+        let exists = CodexPaths.isInstalled
+        if exists != codexInstalled { codexInstalled = exists }
+    }
+
+    /// Recomputed only when hooks.json or config.toml actually changed (mtime+size stamp), so the 5 s tick
+    /// costs two stat() calls, not re-parsing both files plus a SHA-256. Publishes only on change.
+    private var codexHookFilesStamp: String?
+    private func refreshCodexHookState(force: Bool = false) {
+        let stamp = [CodexHooksInstaller.hooksPath, CodexHooksInstaller.configPath].map { path -> String in
+            guard let a = try? FileManager.default.attributesOfItem(atPath: path) else { return "-" }
+            let m = (a[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            return "\(m):\((a[.size] as? NSNumber)?.int64Value ?? 0)"
+        }.joined(separator: "|")
+        guard force || stamp != codexHookFilesStamp else { return }
+        codexHookFilesStamp = stamp
+        let installed = CodexHooksInstaller.isInstalled()
+        let perm = CodexHooksInstaller.isPermissionHookInstalled()
+        let trust = CodexHooksInstaller.trustState()
+        if installed != codexHooksInstalled { codexHooksInstalled = installed }
+        if perm != codexPermissionHookInstalled { codexPermissionHookInstalled = perm }
+        if trust != codexHooksTrust {
+            Log.codex.info("codex hooks trust: \(codexHooksTrust) → \(trust)")
+            codexHooksTrust = trust
+        }
+    }
+
+    // MARK: - Codex hooks (install/remove in ~/.codex/hooks.json)
+
+    func installCodexHooks() {
+        guard !refuseHookInstallFromTransientLocation("op.installCodexHooks") else { return }
+        runHookOp("op.installCodexHooks") { try CodexHooksInstaller.install() }
+    }
+    func uninstallCodexHooks() { runHookOp("op.uninstallCodexHooks") { try CodexHooksInstaller.uninstall() } }
+    func installCodexPermissionHook() {
+        guard !refuseHookInstallFromTransientLocation("op.installCodexPermission") else { return }
+        runHookOp("op.installCodexPermission") { try CodexHooksInstaller.installPermissionHook() }
+    }
+    func uninstallCodexPermissionHook() { runHookOp("op.uninstallCodexPermission") { try CodexHooksInstaller.uninstallPermissionHook() } }
+
+    private func refreshRegistry() async {
+        registry = await Task.detached { SessionRegistryReader.readAll() }.value
+        registryLiveCount = registry.count
+        render()
+    }
+
+    // MARK: - Codex (mode A over ~/.codex)
+
+    /// Start the Codex watchers iff enabled + installed + not already running. Idempotent.
+    private func startCodexIfEnabled() {
+        guard WidgetSettings.shared.codexEnabled, codexInstalled, codexWatcher == nil else { return }
+        Task { await rescanCodex(render: true) }
+        let w = TranscriptWatcher(path: CodexPaths.sessionsRoot, onChange: { [weak self] paths in
+            guard let self else { return }
+            Task { await self.handleCodex(paths) }
+        }, onFullRescan: { [weak self] in
+            guard let self else { return }
+            Task { await self.rescanCodex(render: true) }
+        })
+        w.start()
+        codexWatcher = w
+        // Lock files are created when a thread is (re)opened in a Codex process and never deleted; the
+        // store re-checks lock STATE on every tick, this watcher just makes a freshly-opened old thread
+        // appear without waiting for that tick.
+        let lw = TranscriptWatcher(path: CodexPaths.writerLocksDir) { [weak self] paths in
+            guard let self else { return }
+            Task { await self.handleCodex(paths) }
+        }
+        lw.start()
+        codexLockWatcher = lw
+        Log.codex.info("codex watch started (home=\(CodexPaths.home))")
+    }
+
+    private func stopCodex() {
+        codexWatcher?.stop(); codexWatcher = nil
+        codexLockWatcher?.stop(); codexLockWatcher = nil
+        codexSessions = []
+        codexProjects = []   // Codex-sourced product groups go with it
+        render()
+        Log.codex.info("codex watch stopped")
+    }
+
+    /// The Settings toggle. Persists the choice and starts/stops the watchers at once.
+    func setCodexEnabled(_ on: Bool) {
+        WidgetSettings.shared.codexEnabled = on
+        if on { refreshCodexPresence(); startCodexIfEnabled() } else { stopCodex() }
+    }
+
+    private func handleCodex(_ paths: [String]) async {
+        codexSessions = await codexStore.ingest(paths: paths, now: Date())
+        render()
+    }
+
+    private func rescanCodex(render doRender: Bool) async {
+        codexSessions = await codexStore.rescan(now: Date())
+        firstCodexScanDone = true
+        codexProjects = await codexStore.knownProjects
+        if doRender { render() }
     }
 
     private func refreshUsage() async {
@@ -530,6 +726,8 @@ final class StateEngine: ObservableObject {
         for hostSessions in remotePoller.lastSessions.values {
             for (id, s) in hostSessions { byId[id] = s }
         }
+        // Codex threads (mode A over ~/.codex) — `codex:<thread_id>` keys, disjoint by construction.
+        for s in codexSessions { byId[s.id] = s }
 
         // Local hook status folded with every reachable remote host's status. Iterating THIS merged map
         // instead of `statusBySession` IS the remote-normalization: a remote session now goes through the
@@ -570,10 +768,14 @@ final class StateEngine: ObservableObject {
                     a.lastActivity = st.updatedAt
                 }
                 byId[id] = a
-            } else {
+            } else if SessionInfo.parseCodexID(id) == nil {
                 // A status file with no matching session yet (transcript not tailed) still surfaces the
                 // chat; carry `remoteHostId` so a remote-only chat is tagged correctly (offline / pid-reap
                 // exclusion / deep-link) instead of looking local.
+                // A CODEX status file never creates a row on its own: the Codex store owns a thread's
+                // listing (a finished, closed thread drops at once by design), so a hook record only
+                // overlays a row that exists — otherwise a `codex-<id>.json` left by `stop` would
+                // resurrect the thread as a Claude-badged row for the whole stale window.
                 byId[id] = SessionInfo(id: id, project: st.project, cwd: st.cwd, gitBranch: nil,
                                        title: nil, state: hookState, lastActivity: st.updatedAt,
                                        remoteHostId: st.remoteHostId)
@@ -586,6 +788,51 @@ final class StateEngine: ObservableObject {
         for (id, st) in status where byId[id] != nil {
             byId[id]?.host = st.host
             byId[id]?.hostBundleId = st.hostBundleId
+        }
+
+        // Claude Code's OWN session registry (see `SessionRegistryReader`): the agent's word on busy /
+        // idle / waiting, its launch folder, its user-given name and where it runs. For working/done it
+        // outranks both the transcript tail and the hook status — those are inferences about the same
+        // process, this is the process reporting — with two carve-outs: a chat kept `working` by a live
+        // sub-agent / workflow stays working (the registry describes the MAIN agent, which can sit idle
+        // while its children run), and the ground-truth force-red rules below still apply after it (they
+        // only ever make a chat redder). A long-idle open tab with no recent activity stays out of the
+        // list, as before: only busy/waiting entries, recently-changed ones, or ones already listed count.
+        if WidgetSettings.shared.useSessionRegistry {
+            for (sid, e) in registry {
+                guard !e.isHidden, let regState = e.sessionState,
+                      let stamp = e.statusUpdatedAt ?? e.updatedAt ?? e.startedAt else { continue }
+                // Staleness gate, like every other source: an entry whose status hasn't changed for twice the
+                // stale window (a frozen/suspended `claude`, a slept laptop) stops asserting anything — the
+                // transcript/hook sources below age out on their own, so the row disappears instead of being
+                // pinned yellow or red forever. (2× because one long tool run can legitimately sit `busy`
+                // past `staleWindow`.)
+                guard now.timeIntervalSince(stamp) <= staleWindow * 2 else { continue }
+                let recent = now.timeIntervalSince(stamp) <= staleWindow
+                guard regState != .done || recent || byId[sid] != nil else { continue }
+                var a = byId[sid] ?? SessionInfo(id: sid, project: (e.cwd as NSString).lastPathComponent,
+                                                  cwd: e.cwd.isEmpty ? nil : e.cwd, gitBranch: nil, title: nil,
+                                                  state: regState, lastActivity: stamp)
+                // The registry describes the MAIN agent, which sits idle while sub-agents / a workflow run:
+                // the transcript fold (`workingViaChildren`, which carries the sub-agent grace and the
+                // workflow live window) is the authority for "something is still running here".
+                let childrenWorking = a.workingViaChildren || a.children.contains { $0.state == .working }
+                a.state = (regState == .done && childrenWorking) ? .working : regState
+                a.waitingKind = regState == .waiting ? e.waitingKind : nil
+                a.lastActivity = max(a.lastActivity, stamp)
+                if !e.cwd.isEmpty {
+                    a.cwd = e.cwd
+                    a.project = (e.cwd as NSString).lastPathComponent
+                }
+                if let name = e.userName { a.title = name }
+                if e.host != .unknown {
+                    a.host = e.host
+                    if e.host == .desktop { a.hostBundleId = DeepLinker.claudeDesktopBundleId }
+                }
+                a.hostSessionId = e.hostSessionId
+                a.isBackground = e.isBackground
+                byId[sid] = a
+            }
         }
 
         // A live permission request is GROUND TRUTH: the broker is blocking on it right now, so the chat
@@ -622,7 +869,10 @@ final class StateEngine: ObservableObject {
 
         var list = Array(byId.values)
         for i in list.indices {
-            list[i].tokens = usageBySession[list[i].id]
+            // ccusage (≥ 20) prices Codex threads too, keyed `codex:<thread_id>` like the row. When it
+            // has no figure yet, keep the one the Codex store put there (the catalog's running count)
+            // instead of blanking the cell; Claude rows start with nil, so nothing changes for them.
+            if let u = usageBySession[list[i].id] { list[i].tokens = u }
         }
         list.removeAll { $0.state == .stale }
         // Reap a chat whose owning process is gone (window closed / session killed / Ctrl-C'd) instead of
@@ -640,7 +890,8 @@ final class StateEngine: ObservableObject {
             // pid-reap is LOCAL-only: never run `ProcTree.isAlive` on a remote host's pid (it belongs to
             // another machine). `remoteHostId == nil` gates it — remote sessions are offline-marked / aged
             // instead, never reaped by local process liveness.
-            guard let st = status[s.id], st.remoteHostId == nil, let pid = st.ownerPid,
+            guard registry[s.id] == nil,   // listed in the registry ⇒ its process is alive (a resumed chat may carry an older status pid)
+                  let st = status[s.id], st.remoteHostId == nil, let pid = st.ownerPid,
                   now.timeIntervalSince(st.updatedAt) <= staleWindow,
                   !ProcTree.isAlive(pid) else { return false }
             if s.state == .done { return true }
@@ -655,7 +906,26 @@ final class StateEngine: ObservableObject {
                 list[i].isOffline = true
             }
         }
+        // Product groups: resolve against THIS render's live set (auto-suggestions need the live cwds), then
+        // stamp each chat with its group root for the "by product" panel mode.
+        let groups = ProductGroups.resolve(manual: manualGroups, codex: codexProjects, sessions: list)
+        if groups != productGroups { productGroups = groups }
+        for i in list.indices {
+            let g = ProductGroups.group(for: list[i].cwd, in: groups)
+            list[i].productRoot = g?.root
+            list[i].productGroupIsAuto = g?.source == .auto
+        }
         sessions = sortedForDisplay(list)
+        // Keep the remembered "expanded" set bounded to chats that still exist — but only once every
+        // active source has completed its first scan (see `firstClaudeScanDone`), and never for Codex ids
+        // while Codex is off (re-enabling it restores their chevrons).
+        if firstClaudeScanDone, codexWatcher == nil || firstCodexScanDone {
+            var keep = Set(sessions.map(\.id))
+            if codexWatcher == nil {
+                keep.formUnion(WidgetSettings.shared.expandedSessionIDs.filter { SessionInfo.parseCodexID($0) != nil })
+            }
+            WidgetSettings.shared.pruneExpandedSessions(keeping: keep)
+        }
 
         // Log per-session state transitions with their raw inputs BEFORE `manageCompletions` rolls
         // `lastDisplayState` forward — this is the signal that was missing when the question-native /
@@ -671,12 +941,16 @@ final class StateEngine: ObservableObject {
             // `mergedStatus`), so this reads ONE path — the previous `else if s.isRemote` special-case
             // (which had to look at `SessionInfo.lastEvent`) is gone. A remote chat parked on a native
             // prompt gets its "→ open chat" ribbon through the exact same computation as local.
-            guard let st = status[s.id], now.timeIntervalSince(st.updatedAt) <= staleWindow else { return nil }
             let kind: AttentionItem.Kind
-            switch st.lastEvent {
-            case "question-native":   kind = .question
-            case "permission-native": kind = .permission
-            default:                  return nil
+            if let st = status[s.id], now.timeIntervalSince(st.updatedAt) <= staleWindow,
+               let ev = st.lastEvent, Self.nativeWaitEvents.contains(ev) {
+                kind = ev == "question-native" ? .question : .permission
+            } else if let w = s.waitingKind {
+                // No hook record (hooks off, or a host where the broker took its no-wait path and never
+                // wrote) but Claude Code's registry says the chat waits on the user — same ribbon.
+                kind = w == .input ? .question : .permission
+            } else {
+                return nil
             }
             return AttentionItem(id: s.id, cwd: s.cwd, project: s.project,
                                  branch: s.gitBranch ?? "", kind: kind)
@@ -707,8 +981,9 @@ final class StateEngine: ObservableObject {
             let modeA = rawById[s.id]?.rawValue ?? "—"
             let hook = status[s.id].map { "\($0.state.rawValue)/\($0.lastEvent ?? "?")" } ?? "—"
             let pending = activePendingSessions.contains(s.id) ? "yes" : "no"
-            Log.watcher.info("state sid=\(s.id.prefix(8)) \(prev.rawValue)→\(s.state.rawValue) "
-                + "(modeA=\(modeA) hook=\(hook) pending=\(pending))")
+            let reg = registry[s.id].map { "\($0.status?.rawValue ?? "?")\($0.waitingFor.map { "/\($0)" } ?? "")" } ?? "—"
+            Log.watcher.info("state sid=\(sidTag(s.id)) \(prev.rawValue)→\(s.state.rawValue) "
+                + "(modeA=\(modeA) hook=\(hook) registry=\(reg) pending=\(pending) agent=\(s.agent.rawValue))")
         }
     }
 
@@ -735,7 +1010,7 @@ final class StateEngine: ObservableObject {
                         CompletionNotice(id: s.id, cwd: s.cwd, project: s.project,
                                          branch: s.gitBranch ?? "", createdAt: now),
                         at: 0)
-                    Log.watcher.info("chat finished sid=\(s.id.prefix(8)) project=\(s.project) → done notice")
+                    Log.watcher.info("chat finished sid=\(sidTag(s.id)) project=\(s.project) → done notice")
                     // Precise auto-dismiss at exactly `doneNoticeWindow`, so the card vanishes in step with
                     // the ribbon's countdown bar (the render-based expiry above is only a coarse backstop
                     // bounded by the tick). `ifCreatedAt` makes it a no-op if a resume/tap cleared this
@@ -770,18 +1045,44 @@ final class StateEngine: ObservableObject {
     /// Host + bundle id for a session, from its mode-B status (the sole authority on host). `.unknown`/nil
     /// when there's no status record — `DeepLinker` then falls back to the Cursor path. Used by the ribbon
     /// "перейти в чат" actions, whose `RibbonItem`s carry only a session id.
-    func hostInfo(for sessionId: String) -> (host: SessionHost, bundleId: String?) {
+    func hostInfo(for sessionId: String) -> (host: SessionHost, bundleId: String?, hostSessionId: String?) {
+        // The registry knows the host for desktop/IDE chats even with hooks off, plus the desktop app's
+        // own session handle for its deep link.
+        if let e = registry[sessionId], e.host != .unknown {
+            let bundle = e.host == .desktop ? DeepLinker.claudeDesktopBundleId : mergedStatus[sessionId]?.hostBundleId
+            return (e.host, bundle, e.hostSessionId)
+        }
+        if SessionInfo.parseCodexID(sessionId) != nil {
+            let s = codexSessions.first { $0.id == sessionId }
+            return (s?.host ?? .codexApp, s?.hostBundleId ?? DeepLinker.codexAppBundleId, nil)
+        }
         // Merged so a remote session (namespaced id) resolves too — DeepLinker forks on `remoteHostId`
         // before reaching here for remotes, but keeping this on the same map avoids a local-only gap.
-        guard let st = mergedStatus[sessionId] else { return (.unknown, nil) }
-        return (st.host, st.hostBundleId)
+        guard let st = mergedStatus[sessionId] else { return (.unknown, nil, registry[sessionId]?.hostSessionId) }
+        return (st.host, st.hostBundleId, registry[sessionId]?.hostSessionId)
     }
 
     // MARK: - Hooks (mode B install/remove)
 
-    func installHooks() { runHookOp("op.installHooks") { try HooksInstaller.install() } }
+    func installHooks() {
+        guard !refuseHookInstallFromTransientLocation("op.installHooks") else { return }
+        runHookOp("op.installHooks") { try HooksInstaller.install() }
+    }
     func uninstallHooks() { runHookOp("op.uninstallHooks") { try HooksInstaller.uninstall() } }
-    func installPermissionHook() { runHookOp("op.installPermission") { try HooksInstaller.installPermissionHook() } }
+    func installPermissionHook() {
+        guard !refuseHookInstallFromTransientLocation("op.installPermission") else { return }
+        runHookOp("op.installPermission") { try HooksInstaller.installPermissionHook() }
+    }
+
+    /// Installing from the mounted DMG / an App Translocation copy would bake a path into settings.json
+    /// (or hooks.json) that disappears with the DMG — every hook would then fail. Refuse with a visible
+    /// reason; uninstall stays allowed. True when refused.
+    private func refuseHookInstallFromTransientLocation(_ opKey: String) -> Bool {
+        guard UpdateSupport.isTransientLocation() else { return false }
+        lastHookError = .blockedTransient
+        Log.settings.warn("hook op \(opKey) refused: running from a transient location (\(Bundle.main.bundlePath))")
+        return true
+    }
     func uninstallPermissionHook() { runHookOp("op.uninstallPermission") { try HooksInstaller.uninstallPermissionHook() } }
 
     /// Prompt for Accessibility (opens the System Settings deep-link). Retained for the `--ax-dump`
@@ -861,6 +1162,20 @@ final class StateEngine: ObservableObject {
     func removeTrustedCommand(_ entry: TrustedCommands.Entry) {
         trustedCommands = TrustedCommands.remove(entry)
         Log.settings.info("trusted remove tool=\(entry.tool.isEmpty ? "*" : entry.tool) pattern=\(entry.pattern)")
+    }
+
+    // MARK: - Product groups (manual roots; Codex projects + auto-suggestions are derived in render())
+
+    func addProductGroup(root: String) {
+        manualGroups = ProductGroups.add(root: root)
+        Log.settings.info("product group add root=\(root)")
+        render()
+    }
+
+    func removeProductGroup(root: String) {
+        manualGroups = ProductGroups.remove(root: root)
+        Log.settings.info("product group remove root=\(root)")
+        render()
     }
 
     // MARK: - Remote hosts (SSH-monitored VS Code + Claude Code sessions on other machines)
@@ -956,11 +1271,12 @@ final class StateEngine: ObservableObject {
             lastHookError = nil
             Log.settings.info("hook op \(opKey) ok")
         } catch {
-            lastHookError = Lf("error.hookOp", L(opKey), error.localizedDescription)
+            lastHookError = .failed(opKey: opKey, error: error)
             Log.settings.error("hook op \(opKey) failed: \(error.localizedDescription)")
         }
         hooksInstalled = HooksInstaller.isInstalled()
         permissionHookInstalled = HooksInstaller.isPermissionHookInstalled()
+        refreshCodexHookState(force: true)
     }
 
     // MARK: - Menu-bar presentation

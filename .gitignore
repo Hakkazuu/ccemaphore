@@ -46,6 +46,11 @@ DerivedData/
 # Raw screen recordings — the optimized GIF (docs/media/demo.gif) is what ships.
 *.mov
 
+# Signing secrets (the Sparkle EdDSA key, the Developer ID .p12): export them outside the repo
+# (docs/RELEASING.md); this only catches a slip.
+*.key
+*.p12
+
 # CocoaPods
 #
 # We recommend against adding the Pods directory to your .gitignore. However

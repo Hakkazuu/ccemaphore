@@ -30,6 +30,25 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     /// `forcedOpen`, this bypasses `hoverTick()` ENTIRELY (checked first, before the ribbon-preemption
     /// guard OR the mouse-leave collapse timer) — a true pin, not just a one-shot escape hatch.
     private(set) var pinnedOpen = false
+    /// The current pin was set by `showUpdatePanel()` (an update surface asked for attention), not by the
+    /// user — so it's handed back to hover once the update phase returns to `.idle` (`releaseUpdatePin`), or
+    /// once its result has been on screen long enough (`updatePinExpired`). A user pin (right-click) never sets
+    /// this and is never released automatically.
+    private var pinnedForUpdate = false
+    /// When the phase an update pin holds became a RESULT (anything but checking / downloading / extracting /
+    /// installing). Nil while the update is in flight — the pin then holds unconditionally.
+    private var updatePinResultSince: Date?
+    /// The pointer has been over the light or the panel since that result appeared.
+    private var updatePinSeen = false
+    /// How long an unattended update result keeps its pin before the panel is handed back to hover.
+    private let updatePinResultHold: TimeInterval = 12
+    /// The user hid the light, but a status-menu update action needs the panel, which anchors at the light —
+    /// so the light is shown for that panel only (`showUpdatePanel(revealingLight:)`). Never saved, never
+    /// published to the presence beacon (`engine.setWidgetVisible` follows the user's own setting only), and
+    /// dropped as soon as the panel closes (`hideExpanded`).
+    private var revealedForUpdate = false
+    /// The light is on screen: the user's "Show light" setting, or the temporary update reveal above.
+    private var lightShown: Bool { settings.visible || revealedForUpdate }
     private var cancellables = Set<AnyCancellable>()
     /// Guards `windowDidResize`/`windowDidMove` re-entrancy while WE are setting the frame.
     private var adjustingFrame = false
@@ -70,6 +89,9 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     /// top). Decided in `captureAnchors` from the bare tower's resting position.
     private enum VerticalMode { case center, top, bottom }
     private var savedVerticalMode: VerticalMode = .center
+    /// The in-flight manual drag of the light (see `beginDrag`): the cursor's screen position the grab
+    /// started at and the window origin at that moment. Nil when not dragging.
+    private var dragStart: (mouse: NSPoint, origin: NSPoint)?
 
     /// New-alert detector + sound: the ribbon at the light IS the notification now (toasts are gone), so
     /// a newly-appearing request / question / completion chimes with the sound configured for its type
@@ -134,6 +156,21 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         notif.objectWillChange
             .sink { [weak self] in DispatchQueue.main.async { self?.applyWindowState() } }
             .store(in: &cancellables)
+        // In-app updates: a user-initiated check started / finished (or Sparkle wants the update in focus)
+        // bumps `focusRequest` → open + pin the panel so its update row is in view even when the check came
+        // from the status menu. The initial value is skipped (nothing has asked yet). The pin is ours, so
+        // it's released when the update phase returns to `.idle`, or once its result has been seen — a
+        // finished check never strands it open.
+        let updater = AppUpdater.shared
+        updater.$focusRequest
+            .dropFirst()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.showUpdatePanel() } }
+            .store(in: &cancellables)
+        updater.$phase
+            .map { Self.updateStage($0) }
+            .removeDuplicates()
+            .sink { [weak self] stage in DispatchQueue.main.async { self?.updateStageChanged(stage) } }
+            .store(in: &cancellables)
         applyWindowState()
         startHoverTracking()
         registerSystemObservers()
@@ -168,7 +205,7 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         if expanded, !pinnedOpen, !forcedOpen { hideExpanded() }
         if rearmTimer { startHoverTracking() }   // the run loop can drop the timer across sleep
         if let panel = lightPanel, let screen = panel.screen ?? NSScreen.main {
-            if settings.visible, !panel.isVisible { panel.orderFrontRegardless() }
+            if lightShown, !panel.isVisible { panel.orderFrontRegardless() }
             adjustingFrame = true
             // Full screen bounds, not `visibleFrame` — a Space switch fires this on EVERY desktop
             // change, so clamping into the Dock-excluding `visibleFrame` here would yank a
@@ -211,6 +248,11 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         panel.contentViewController = controller
         controller.view.wantsLayer = true
         controller.view.layer?.backgroundColor = NSColor.clear.cgColor
+        // Size the window to its content NOW. On macOS 27 assigning the controller leaves the window 0×0
+        // until the next layout pass, so `restorePosition` clamped + captured anchors off a zero-size frame
+        // and the deferred resize then re-pinned the light a full width left and half a height down from
+        // where it was saved (verified on 27.0.1: saved 1634,546 → shown 1540,461 for a 94×169 tower).
+        panel.setContentSize(controller.view.fittingSize)
     }
 
     private func buildLightPanel() {
@@ -224,6 +266,12 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         // tell the frosted housing from the soft lamp glows, so over the padded (glow-room) window it
         // rendered a big dark rounded-rect halo around the light. One contained SwiftUI shadow instead.
         panel.hasShadow = false
+        // The light moves itself (`beginDrag`, driven by a drag on the bare tower) — the system background
+        // drag stays OFF on every macOS. macOS 27 stopped honouring it for a borderless panel hosting an
+        // `NSHostingView`: the flags still read right (`mouseDownCanMoveWindow` true, hitTest → the hosting
+        // view — verified on 27.0.1) yet AppKit never starts the move. Leaving it on would double-move the
+        // window on 13–26, where it still works.
+        panel.isMovableByWindowBackground = false
         panel.delegate = self
         host(root, in: panel)
         self.lightPanel = panel
@@ -231,20 +279,21 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         panel.orderFrontRegardless()
     }
 
-    // MARK: - Window state (opacity / pin / visibility)
+    // MARK: - Window state (opacity / visibility)
 
     private func applyWindowState() {
         guard let panel = lightPanel else { return }
-        if settings.visible {
+        if lightShown {
             if !panel.isVisible { panel.orderFrontRegardless() }
         } else {
             panel.orderOut(nil)
             hideExpanded()
         }
-        panel.isMovableByWindowBackground = !settings.pinned
         updateLightOpacity()
         // The ribbon at the visible light is where the user answers a permission request, so the broker
-        // treats "widget visible" as "user is reachable now" (→ a real wait window).
+        // treats "widget visible" as "user is reachable now" (→ a real wait window). The user's own setting
+        // only: a light shown just for an update panel (`revealedForUpdate`) must not change how long the
+        // permission hook waits.
         engine.setWidgetVisible(settings.visible)
         // The ribbon owns the light — never overlap it with the hover panel (unless the user explicitly
         // force-opened it via the menu-bar "Open panel" item, or pinned it open — see `forceShowExpanded`
@@ -322,10 +371,15 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     }
 
     private func hoverTick() {
-        guard let light = lightPanel, light.isVisible, settings.visible else { return }
+        guard let light = lightPanel, light.isVisible, lightShown else { return }
         // Pinned open (menu-bar right-click) bypasses hover entirely — no ribbon-preemption check, no
-        // mouse-leave collapse timer. Only `togglePinnedPanel()` closes it.
-        if pinnedOpen { return }
+        // mouse-leave collapse timer. Only `togglePinnedPanel()` closes it. An UPDATE pin holds only until its
+        // result has been seen (`updatePinExpired`); then the panel is plain hover again, collapsing below once
+        // the pointer is away.
+        if pinnedOpen {
+            guard updatePinExpired(light) else { return }
+            handUpdatePinToHover("result shown")
+        }
         // A modal we own (the custom-sound NSOpenPanel, opened from Настройки) is up. The picker sits over
         // neither the light nor the management panel, so the mouse-leave logic below would collapse the
         // settings panel out from under the import flow. Freeze hover until the modal closes.
@@ -344,6 +398,7 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         // a few hours, fixed only by relaunch" bug. Reconcile to reality before deciding.
         if expanded, !(expandedPanel?.isVisible ?? false) {
             expanded = false; insideSince = nil; outsideSince = nil
+            endUpdateReveal()   // the panel a hidden light was shown for is gone
             Log.watcher.info("hover self-heal: cleared stale expanded (panel off-screen)")
         }
         // Ghost-window heal: `isVisible` is only the CLIENT's "I ordered it in" flag. After heavy
@@ -455,7 +510,7 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     /// mouse-leaves-the-panel collapse still applies, and any panel action (or the ribbon getting a NEW
     /// event) that calls `hideExpanded()` clears the flag.
     func forceShowExpanded() {
-        guard lightPanel != nil, settings.visible else { return }
+        guard lightPanel != nil, lightShown else { return }
         forcedOpen = true
         if !expanded { showExpanded() }
     }
@@ -465,7 +520,7 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     /// if it's already pinned, unpin and close it. This is the "stays open until clicked again" behavior
     /// requested for the menu-bar icon, distinct from `forceShowExpanded`'s one-shot escape hatch.
     func togglePinnedPanel() {
-        guard lightPanel != nil, settings.visible else { return }
+        guard lightPanel != nil, lightShown else { return }
         if pinnedOpen {
             hideExpanded()
         } else {
@@ -474,8 +529,108 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Hide the management panel (hover left, or a panel action asked to close). Public alias for the
-    /// panel's own ▾ button. Never re-enters `applyWindowState` (that recursed in v1).
+    /// Bring the update row into view: open the management panel PINNED (the same pin as
+    /// `togglePinnedPanel`, so hover can't collapse it mid-check) — the non-toggling variant for update
+    /// surfaces (`AppUpdater.focusRequest`, the status menu's update items). A panel that's already on
+    /// screen (hover or pin) is left exactly as it is. While the user has the light hidden, only an explicit
+    /// status-menu action (`revealingLight`) shows it, and only for this panel (`revealedForUpdate`) — the
+    /// saved "Show light" setting is never touched.
+    func showUpdatePanel(revealingLight: Bool = false) {
+        guard let light = lightPanel else { return }
+        if !settings.visible {
+            guard revealingLight else { return }
+            if !revealedForUpdate {
+                revealedForUpdate = true
+                Log.watcher.info("light shown for an update action (hidden in settings; the setting is unchanged)")
+            }
+            if !light.isVisible { light.orderFrontRegardless() }
+            updateLightOpacity()
+        }
+        if expanded, expandedPanel?.isVisible ?? false { return }
+        expanded = false   // a stale flag (panel dropped by a system event): hoverTick's self-heal, applied now
+        pinnedOpen = true
+        pinnedForUpdate = true
+        // Opened on a result that's already there (e.g. the menu's item for an offer): its hold starts now.
+        updatePinResultSince = Self.updateStage(AppUpdater.shared.phase) == .result ? Date() : nil
+        updatePinSeen = false
+        showExpanded()
+        // A check request bumps `focusRequest` a beat before Sparkle reports `.checking`, so the pin is
+        // taken while the phase may still be idle. If it never moves (nothing started), drop the pin again
+        // instead of leaving an update-less panel stuck open.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.releaseUpdatePin() }
+    }
+
+    /// The update phase, as the update pin sees it.
+    private enum UpdateStage: Sendable { case idle, inFlight, result }
+
+    nonisolated private static func updateStage(_ phase: UpdatePhase) -> UpdateStage {
+        switch phase {
+        case .idle: return .idle
+        case .checking, .downloading, .extracting, .installing: return .inFlight
+        default: return .result
+        }
+    }
+
+    /// Back at idle, an update pin is handed to hover (`releaseUpdatePin`). Otherwise note when a held pin's
+    /// result appeared: in-flight phases keep the pin unconditionally, a result only until it's been seen.
+    private func updateStageChanged(_ stage: UpdateStage) {
+        switch stage {
+        case .idle:
+            releaseUpdatePin()
+        case .inFlight:
+            updatePinResultSince = nil
+            updatePinSeen = false
+        case .result:
+            guard pinnedForUpdate, updatePinResultSince == nil else { return }
+            updatePinResultSince = Date()
+            updatePinSeen = false
+        }
+    }
+
+    /// An update pin only bridges the wait for a result (a check started from the status menu, a download's
+    /// progress). The panel has no close control, and a result may never return to idle by itself (an
+    /// unanswered offer, a failure, restart-needed) — so once a result is on screen the pin ends when the user
+    /// has looked (the pointer was over the light or the panel, then left) or after `updatePinResultHold`
+    /// unattended. Hover then collapses the panel as usual; the row itself stays reachable on hover.
+    private func updatePinExpired(_ light: NSPanel) -> Bool {
+        guard pinnedForUpdate, let since = updatePinResultSince else { return false }
+        let p = NSEvent.mouseLocation
+        let over = light.frame.insetBy(dx: -8, dy: -8).contains(p)
+            || (expandedPanel.map { $0.isVisible && $0.frame.insetBy(dx: -8, dy: -8).contains(p) } ?? false)
+            || (expandedPanel?.isKeyWindow ?? false)
+        if over {
+            updatePinSeen = true
+            return false
+        }
+        return updatePinSeen || Date().timeIntervalSince(since) >= updatePinResultHold
+    }
+
+    /// The update phase is back to (or still) `.idle` — check finished, update dismissed / skipped,
+    /// simulation cleared: hand a pin `showUpdatePanel` set back to hover, which collapses the panel once
+    /// the mouse is away.
+    private func releaseUpdatePin() {
+        guard pinnedForUpdate, AppUpdater.shared.phase == .idle else { return }
+        handUpdatePinToHover("update idle")
+    }
+
+    private func handUpdatePinToHover(_ why: String) {
+        pinnedForUpdate = false
+        pinnedOpen = false
+        updatePinResultSince = nil
+        updatePinSeen = false
+        Log.watcher.debug("update pin handed to hover (\(why))")
+    }
+
+    /// The panel a hidden light was shown for has closed: back to the user's setting.
+    private func endUpdateReveal() {
+        guard revealedForUpdate else { return }
+        revealedForUpdate = false
+        if !settings.visible { lightPanel?.orderOut(nil) }
+        Log.watcher.info("light hidden again — its update panel closed")
+    }
+
+    /// Hide the management panel (hover left, or a panel action asked to close). Never re-enters
+    /// `applyWindowState` (that recursed in v1). A light shown only for an update panel goes with it.
     func hideExpanded() {
         let wasExpanded = expanded
         expanded = false
@@ -484,7 +639,11 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         outsideSince = nil
         forcedOpen = false
         pinnedOpen = false
+        pinnedForUpdate = false
+        updatePinResultSince = nil
+        updatePinSeen = false
         expandedPanel?.orderOut(nil)
+        endUpdateReveal()
         updateLightOpacity()
         if wasExpanded { Log.watcher.debug("hover collapse") }
     }
@@ -592,14 +751,55 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
                        y: min(max(screenFrame.minY, origin.y), maxTop - size.height))
     }
 
+    private func savePosition(_ panel: NSPanel, on screen: NSScreen) {
+        let id = displayID(screen)
+        settings.setPosition(panel.frame.origin, forDisplay: id)
+        settings.lastDisplayID = id
+    }
+
+    // MARK: - Manual drag
+    //
+    // Driven by a SwiftUI drag on the bare tower (`LightRootView`) — the system background drag is off
+    // (see `buildLightPanel`). Positions come from `NSEvent.mouseLocation` in SCREEN coordinates: the
+    // gesture's own translation is window-relative and collapses to ~0 once the window follows the cursor.
+
+    /// First event of a new drag. `translation` is the gesture's slop at that moment — the window hasn't
+    /// moved yet, so it's still exact; backing it out keeps the grab point under the cursor (no jump).
+    func beginDrag(translation t: CGSize) {
+        guard let panel = lightPanel, !settings.pinned else { dragStart = nil; return }
+        let m = NSEvent.mouseLocation
+        dragStart = (NSPoint(x: m.x - t.width, y: m.y + t.height), panel.frame.origin)   // SwiftUI y grows down
+        continueDrag()
+    }
+
+    func continueDrag() {
+        guard let panel = lightPanel, let s = dragStart else { return }
+        let m = NSEvent.mouseLocation
+        panel.setFrameOrigin(NSPoint(x: s.origin.x + m.x - s.mouse.x, y: s.origin.y + m.y - s.mouse.y))
+    }
+
+    /// Release (or cancellation). Clamp onto the screen it landed on — the same flush-allowed rule
+    /// `recoverHover` applies — then persist once (`windowDidMove` skips saving mid-drag).
+    func endDrag() {
+        guard dragStart != nil else { return }
+        dragStart = nil
+        guard let panel = lightPanel, let screen = panel.screen ?? NSScreen.main else { return }
+        adjustingFrame = true
+        panel.setFrameOrigin(clamp(origin: panel.frame.origin, size: panel.frame.size, into: screen.frame, visibleFrame: screen.visibleFrame))
+        adjustingFrame = false
+        savePosition(panel, on: screen)
+        captureAnchors(panel)
+        if expanded { positionExpandedPanel() }
+    }
+
     // MARK: - NSWindowDelegate
 
     func windowDidMove(_ notification: Notification) {
         guard !adjustingFrame, let panel = lightPanel, panel === notification.object as? NSWindow,
               let screen = panel.screen else { return }
-        let id = displayID(screen)
-        settings.setPosition(panel.frame.origin, forDisplay: id)
-        settings.lastDisplayID = id
+        // Mid-drag this fires per mouse event; persisting each time would rewrite UserDefaults and
+        // republish settings at pointer rate — `endDrag` saves once on release instead.
+        if dragStart == nil { savePosition(panel, on: screen) }
         captureAnchors(panel)
         if expanded { positionExpandedPanel() }
     }
@@ -688,6 +888,16 @@ struct LightRootView: View {
     @ObservedObject var notif: NotificationSettings
 
     @State private var ribbonIndex = 0
+    /// True while the bare tower is being dragged. Being a `@GestureState`, it also resets when the gesture
+    /// is CANCELLED (a ribbon replacing the tower mid-drag), where `onEnded` never fires — see `body`.
+    @GestureState private var dragging = false
+
+    /// The agent badge for a ribbon item: the session's origin when its row exists, else by id
+    /// namespace — a Codex permission request can reach the broker before the thread's row is built,
+    /// and the hook keys it `codex:<id>`.
+    private func agent(for sessionId: String, _ session: SessionInfo?) -> AgentKind {
+        session?.originAgent ?? (SessionInfo.parseCodexID(sessionId) != nil ? .codex : .claude)
+    }
 
     /// LIVE broker requests (actionable) — the red decision items. Hidden when the permission type is off.
     private var decisionItems: [RibbonItem] {
@@ -703,7 +913,8 @@ struct LightRootView: View {
                        branch: session?.gitBranch ?? "",
                        command: req.detail ?? req.summary,
                        chatTitle: session?.title,
-                       host: h.host, hostBundleId: h.bundleId,
+                       agent: agent(for: req.sessionId, session),
+                       host: h.host, hostBundleId: h.bundleId, hostSessionId: h.hostSessionId,
                        remoteHostLabel: req.remoteHostId.flatMap { RemoteHosts.resolve($0)?.label },
                        remoteHostId: req.remoteHostId)
         }
@@ -722,7 +933,8 @@ struct LightRootView: View {
             return RibbonItem(id: a.id, kind: .attention(a.kind), sessionId: a.id, cwd: a.cwd,
                        project: a.project, branch: a.branch, command: nil,
                        chatTitle: session?.title,
-                       host: h.host, hostBundleId: h.bundleId,
+                       agent: agent(for: a.id, session),
+                       host: h.host, hostBundleId: h.bundleId, hostSessionId: h.hostSessionId,
                        remoteHostLabel: session?.remoteHostId.flatMap { RemoteHosts.resolve($0)?.label },
                        remoteHostId: session?.remoteHostId)
         }
@@ -732,10 +944,13 @@ struct LightRootView: View {
         guard notif.effectiveShow(.done) else { return [] }
         return engine.completionNotices.map { n in
             let h = engine.hostInfo(for: n.id)
+            let session = engine.sessions.first { $0.id == n.id }
             return RibbonItem(id: "done-\(n.id)", kind: .completed, sessionId: n.id, cwd: n.cwd,
                        project: n.project, branch: n.branch, command: nil,
-                       chatTitle: engine.sessions.first { $0.id == n.id }?.title,
-                       host: h.host, hostBundleId: h.bundleId, completedAt: n.createdAt)
+                       chatTitle: session?.title,
+                       agent: agent(for: n.id, session),
+                       host: h.host, hostBundleId: h.bundleId, hostSessionId: h.hostSessionId,
+                       completedAt: n.createdAt)
         }
     }
     /// Red (act-now) items — a live decision or a native-prompt attention. These ALONE pulse the tower;
@@ -768,7 +983,22 @@ struct LightRootView: View {
     var body: some View {
         Group {
             if ribbonItems.isEmpty {
+                // The drag handle is the bare tower only: it has no controls of its own, and anchors are
+                // only captured without a ribbon (`captureAnchors`), so a move made under a ribbon would
+                // snap back when it clears. "Закрепить" (`settings.pinned`) is enforced in `beginDrag`.
                 LightTowerView(input: light, scale: settings.size.scale, orientation: settings.orientation)
+                    .gesture(
+                        DragGesture(minimumDistance: 2)
+                            .updating($dragging) { value, isDragging, _ in
+                                if isDragging {
+                                    FloatingWidgetController.shared.continueDrag()
+                                } else {
+                                    isDragging = true
+                                    FloatingWidgetController.shared.beginDrag(translation: value.translation)
+                                }
+                            }
+                            .onEnded { _ in FloatingWidgetController.shared.endDrag() }
+                    )
             } else {
                 PermissionRibbonView(
                     items: ribbonItems,
@@ -789,6 +1019,9 @@ struct LightRootView: View {
         // Breathing room so lamp glows fade out instead of being hard-clipped at the (fit-to-content)
         // window edge — the left/right "dashes". Must scale with the widget size, since the glows do.
         .padding(LightTowerView.glowMargin(scale: settings.size.scale))
+        // A cancelled drag never reaches `onEnded`; the gesture state resetting is the only signal left.
+        // `endDrag` is a no-op once a normal release already ended it.
+        .onChange(of: dragging) { if !$0 { FloatingWidgetController.shared.endDrag() } }
     }
 
     private var clampedIndexBinding: Binding<Int> {
@@ -808,7 +1041,7 @@ struct LightRootView: View {
     /// detection then drops the request — so the ribbon stays truthful (red) until it's actually answered.
     private func openChat(_ r: RibbonItem) {
         DeepLinker.focus(sessionId: r.sessionId, cwd: r.cwd, host: r.host, hostBundleId: r.hostBundleId,
-                         remoteHostId: r.remoteHostId)
+                         remoteHostId: r.remoteHostId, hostSessionId: r.hostSessionId)
         // A completion notice is informational; jumping to it clears it (it also auto-expires).
         if r.isCompleted { engine.dismissCompletion(r.sessionId) }
     }

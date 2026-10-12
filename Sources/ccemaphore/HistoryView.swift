@@ -5,9 +5,11 @@ import AppKit
 /// the list of days on the left, and the chats (with names + tokens) of the selected day on the right.
 ///
 /// Numbers come only from `ccusage`: day totals from `ccusage daily`, per-chat totals from
-/// `ccusage session`. Chats are grouped by their last-activity day — so a rare multi-day chat shows
-/// under the day it finished, and a day may carry tokens with no chat of its own (handled in the
-/// detail empty state). History reaches only as far back as Claude Code keeps transcripts (footer).
+/// `ccusage session` — for Claude Code AND Codex, which ccusage ≥ 20 reports together. Chats are grouped
+/// by their last-activity day — so a rare multi-day chat shows under the day it finished, and a day may
+/// carry tokens with no chat of its own (handled in the detail empty state). When Codex usage is present
+/// the window shows the per-agent split (stacked bars, badges) and an All / Claude / Codex filter.
+/// History reaches only as far back as Claude Code keeps transcripts (footer).
 struct HistoryView: View {
     @ObservedObject var engine: StateEngine
     var body: some View { HistoryContentView(days: engine.days) }
@@ -18,19 +20,31 @@ struct HistoryView: View {
 struct HistoryContentView: View {
     let days: [DayStat]
     @State private var selectedID: String?
+    /// Narrow the whole window to one agent (nil = both). Offered only when the data has Codex usage,
+    /// so a Claude-only install sees the window exactly as before.
+    @State private var agentFilter: AgentKind? = nil
     /// Re-render the open history window when the language changes (its NSWindow title is updated
     /// separately in `HistoryWindowController.localeDidChange`).
     @ObservedObject private var loc = LocalizationManager.shared
 
-    private var selectedDay: DayStat? { days.first { $0.id == selectedID } }
-    private var maxDayTokens: Int { days.map(\.totalTokens).max() ?? 0 }
+    private var hasCodex: Bool { days.contains { $0.share(of: .codex) != nil } }
+    /// The days as filtered: each narrowed to the chosen agent, days where it did nothing dropped.
+    private var visibleDays: [DayStat] {
+        guard let a = agentFilter else { return days }
+        return days.compactMap { $0.restricted(to: a) }
+    }
+    /// Draw the Claude/Codex split (bars, captions, badges) — only in the unfiltered, mixed view.
+    private var showsSplit: Bool { agentFilter == nil && hasCodex }
+    private var selectedDay: DayStat? { visibleDays.first { $0.id == selectedID } }
+    private var maxDayTokens: Int { visibleDays.map(\.totalTokens).max() ?? 0 }
 
     var body: some View {
         VStack(spacing: 0) {
             if days.isEmpty {
                 emptyState
             } else {
-                SummaryStrip(days: days, selectedID: $selectedID)
+                SummaryStrip(days: visibleDays, agentFilter: $agentFilter, showsFilter: hasCodex,
+                             selectedID: $selectedID)
                 Divider()
                 HSplitView {
                     dayList.frame(minWidth: 232, idealWidth: 256, maxWidth: 340)
@@ -44,14 +58,15 @@ struct HistoryContentView: View {
         .frame(minWidth: 660, minHeight: 440)
         .onAppear(perform: syncSelection)
         .onChange(of: days) { _ in syncSelection() }
+        .onChange(of: agentFilter) { _ in syncSelection() }
     }
 
     // MARK: - Left: days
 
     private var dayList: some View {
         List(selection: $selectedID) {
-            ForEach(days) { day in
-                DayRow(day: day, maxTokens: maxDayTokens, isToday: day.id == Fmt.todayString)
+            ForEach(visibleDays) { day in
+                DayRow(day: day, maxTokens: maxDayTokens, isToday: day.id == Fmt.todayString, split: showsSplit)
                     .tag(day.id)
             }
         }
@@ -69,6 +84,10 @@ struct HistoryContentView: View {
                         Text(Fmt.dayFull(day.date)).font(.headline)
                         Text(Lf("history.detail.summary", Lcount("noun.chats", day.chatCount), Fmt.tokens(day.totalTokens), Fmt.cost(day.costUsd)))
                             .font(.caption).foregroundStyle(.secondary)
+                        if showsSplit, day.agents.count > 1 {
+                            Text(AgentSplit.text(day))
+                                .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+                        }
                     }
                     .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
 
@@ -78,7 +97,7 @@ struct HistoryContentView: View {
                         ScrollView {
                             LazyVStack(spacing: 0) {
                                 ForEach(day.chats) { chat in
-                                    ChatRow(chat: chat, maxTokens: day.chats.first?.tokens ?? 0)
+                                    ChatRow(chat: chat, maxTokens: day.chats.first?.tokens ?? 0, showsAgent: hasCodex)
                                     Divider().padding(.leading, 16)
                                 }
                             }
@@ -128,10 +147,12 @@ struct HistoryContentView: View {
 
     // MARK: - Behavior
 
-    /// Keep a valid selection: default to today, else the newest day; re-pick if the day vanished.
+    /// Keep a valid selection: default to today, else the newest day; re-pick if the day vanished (data
+    /// refresh, or the agent filter dropped it).
     private func syncSelection() {
-        if let s = selectedID, days.contains(where: { $0.id == s }) { return }
-        selectedID = days.first(where: { $0.id == Fmt.todayString })?.id ?? days.first?.id
+        let shown = visibleDays
+        if let s = selectedID, shown.contains(where: { $0.id == s }) { return }
+        selectedID = shown.first(where: { $0.id == Fmt.todayString })?.id ?? shown.first?.id
     }
 
     private func revealSettings() {
@@ -145,7 +166,11 @@ struct HistoryContentView: View {
 // MARK: - Summary strip (period totals + per-day bar chart)
 
 private struct SummaryStrip: View {
+    /// The days as currently filtered (the totals follow the filter).
     let days: [DayStat]
+    @Binding var agentFilter: AgentKind?
+    /// Show the All / Claude / Codex picker + the per-agent totals line (only when Codex usage exists).
+    let showsFilter: Bool
     @Binding var selectedID: String?
 
     private var totalTokens: Int { days.reduce(0) { $0 + $1.totalTokens } }
@@ -156,14 +181,21 @@ private struct SummaryStrip: View {
     var body: some View {
         HStack(alignment: .center, spacing: 20) {
             VStack(alignment: .leading, spacing: 8) {
-                Text(L("history.title")).font(.headline)
+                HStack(spacing: 12) {
+                    Text(L("history.title")).font(.headline)
+                    if showsFilter { agentPicker }
+                }
                 HStack(alignment: .top, spacing: 16) {
                     stat(Fmt.tokens(totalTokens), L("history.stat.tokens"))
                     stat(Fmt.cost(totalCost), L("history.stat.cost"))
                     stat("\(totalChats)", Lplural("noun.chats", totalChats))
                     stat("\(days.count)", Lplural("noun.days", days.count))
                 }
+                if showsFilter, agentFilter == nil { agentTotals }
             }
+            // Never let the chart squeeze this column: its texts would wrap letter by letter and the
+            // picker would slide off the edge. The chart adapts to whatever width is left instead.
+            .fixedSize(horizontal: true, vertical: false)
             Spacer(minLength: 12)
             chart
         }
@@ -177,22 +209,96 @@ private struct SummaryStrip: View {
         }
     }
 
-    private var chart: some View {
-        VStack(alignment: .trailing, spacing: 5) {
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(Array(days.reversed())) { day in
-                    BarColumn(
-                        fraction: maxTokens > 0 ? Double(day.totalTokens) / Double(maxTokens) : 0,
-                        state: day.id == selectedID ? .selected
-                             : (day.id == Fmt.todayString ? .today : .normal),
-                        tooltip: "\(Fmt.dayLabel(day.date)), \(Fmt.weekday(day.date)) · \(Fmt.tokens(day.totalTokens)) · \(Fmt.cost(day.costUsd))",
-                        onTap: { selectedID = day.id })
+    /// All / Claude / Codex. Agent names are proper nouns (not localized); "All" and the control's
+    /// accessibility label are.
+    private var agentPicker: some View {
+        Picker(L("history.filter.label"), selection: $agentFilter) {
+            Text(L("history.filter.all")).tag(AgentKind?.none)
+            ForEach(AgentKind.allCases, id: \.self) { a in
+                Text(AgentSplit.name(a)).tag(AgentKind?.some(a))
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .controlSize(.small)
+        .accessibilityLabel(L("history.filter.label"))
+    }
+
+    /// Per-agent totals over the period: badge + tokens · cost for each agent that did something.
+    private var agentTotals: some View {
+        HStack(spacing: 12) {
+            ForEach(AgentKind.allCases, id: \.self) { a in
+                let share = days.reduce(TokenShare()) { acc, d in d.share(of: a).map { acc + $0 } ?? acc }
+                if share.tokens > 0 {
+                    HStack(spacing: 5) {
+                        AgentBadge(agent: a)
+                        Text("\(Fmt.tokens(share.tokens)) · \(Fmt.cost(share.cost))")
+                            .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                    }
                 }
             }
-            .frame(height: 42, alignment: .bottom)
+        }
+    }
+
+    /// Widest pitch per day (the original fixed layout) and the narrowest we still draw before dropping
+    /// the oldest days off the left edge.
+    private static let maxSlot: CGFloat = 15
+    private static let minSlot: CGFloat = 4
+
+    /// The per-day bar chart, sized to the width the strip has left for it: the pitch shrinks from
+    /// `maxSlot` down to `minSlot` as the day count grows (ccusage ≥ 20 reports Codex days beyond Claude's
+    /// retention window, so 50+ days are normal now), and only when even that can't fit are the oldest
+    /// days dropped — the newest always stay, hugging the right edge like before.
+    private var chart: some View {
+        VStack(alignment: .trailing, spacing: 5) {
+            GeometryReader { geo in
+                let count = max(1, days.count)
+                let slot = min(Self.maxSlot, max(Self.minSlot, geo.size.width / CGFloat(count)))
+                let fit = max(0, min(days.count, Int(geo.size.width / slot)))
+                // `days` is newest-first; keep the newest `fit` and draw them oldest → newest.
+                let shown = Array(days.prefix(fit).reversed())
+                HStack(alignment: .bottom, spacing: 0) {
+                    ForEach(shown) { day in
+                        BarColumn(
+                            fraction: maxTokens > 0 ? Double(day.totalTokens) / Double(maxTokens) : 0,
+                            state: day.id == selectedID ? .selected
+                                 : (day.id == Fmt.todayString ? .today : .normal),
+                            tooltip: Self.tooltip(day),
+                            slot: slot,
+                            onTap: { selectedID = day.id })
+                    }
+                }
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomTrailing)
+            }
+            .frame(height: 42)
             Text(L("history.chart.caption")).font(.caption2).foregroundStyle(.tertiary)
         }
     }
+
+    /// "Today, Fri · 1.2M · $3.00", plus the per-agent line on a mixed day.
+    private static func tooltip(_ day: DayStat) -> String {
+        var s = "\(Fmt.dayLabel(day.date)), \(Fmt.weekday(day.date)) · \(Fmt.tokens(day.totalTokens)) · \(Fmt.cost(day.costUsd))"
+        if day.agents.count > 1 { s += "\n" + AgentSplit.text(day) }
+        return s
+    }
+}
+
+/// Per-agent labels shared by the strip, the day rows and the detail header. Agent names are proper
+/// nouns and the rest is numbers, so nothing here needs localizing.
+private enum AgentSplit {
+    static func name(_ a: AgentKind) -> String { a == .claude ? "Claude" : "Codex" }
+
+    /// "Claude 1.2M · $3.00   Codex 300K · $1.00" for the agents that did something that day.
+    static func text(_ day: DayStat) -> String {
+        day.agents.compactMap { a in
+            day.share(of: a).map { "\(name(a)) \(Fmt.tokens($0.tokens)) · \(Fmt.cost($0.cost))" }
+        }.joined(separator: "   ")
+    }
+
+    /// Codex draws lighter than Claude in a stacked bar, in the row's own tint — the lamps keep the only
+    /// saturated hues.
+    static func tint(_ a: AgentKind, base: Color) -> Color { a == .claude ? base : base.opacity(0.45) }
 }
 
 // MARK: - Rows
@@ -201,6 +307,10 @@ private struct DayRow: View {
     let day: DayStat
     let maxTokens: Int
     let isToday: Bool
+    /// Draw the bar as Claude + Codex segments (mixed, unfiltered view).
+    var split: Bool = false
+
+    private var tint: Color { isToday ? .accentColor : Color.secondary.opacity(0.55) }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -210,8 +320,18 @@ private struct DayRow: View {
                     Text(Fmt.dayLabel(day.date)).font(.callout).fontWeight(isToday ? .semibold : .regular)
                     Text(Fmt.weekday(day.date)).font(.caption2).foregroundStyle(.secondary)
                 }
-                VolumeBar(fraction: maxTokens > 0 ? Double(day.totalTokens) / Double(maxTokens) : 0,
-                          width: 92, tint: isToday ? .accentColor : Color.secondary.opacity(0.55))
+                if split, day.agents.count > 1 {
+                    SplitVolumeBar(segments: day.agents.compactMap { a in
+                        day.share(of: a).map {
+                            SplitVolumeBar.Segment(id: a, fraction: maxTokens > 0 ? Double($0.tokens) / Double(maxTokens) : 0,
+                                                   tint: AgentSplit.tint(a, base: tint))
+                        }
+                    }, width: 92)
+                    .help(AgentSplit.text(day))
+                } else {
+                    VolumeBar(fraction: maxTokens > 0 ? Double(day.totalTokens) / Double(maxTokens) : 0,
+                              width: 92, tint: tint)
+                }
             }
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 2) {
@@ -227,6 +347,8 @@ private struct DayRow: View {
 private struct ChatRow: View {
     let chat: ChatStat
     let maxTokens: Int
+    /// Show the Claude / Codex badge — only once the data has both, so Claude-only rows stay as they were.
+    var showsAgent: Bool = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -234,6 +356,7 @@ private struct ChatRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(chat.title ?? L("chat.untitled")).font(.callout).lineLimit(1)
                 HStack(spacing: 6) {
+                    if showsAgent { AgentBadge(agent: chat.agent) }
                     let models = Fmt.models(chat.models)
                     if !models.isEmpty { ModelPill(text: models) }
                     Text(chat.project).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -283,15 +406,48 @@ private struct VolumeBar: View {
     }
 }
 
+/// `VolumeBar` split into per-agent segments laid end to end (Claude solid, Codex lighter) in the same
+/// slot width, so split and plain rows still line up. Fractions are shares of the SAME maximum as the
+/// plain bars, so the segments together span what one solid bar would.
+private struct SplitVolumeBar: View {
+    struct Segment: Identifiable {
+        let id: AgentKind
+        let fraction: Double
+        let tint: Color
+    }
+    let segments: [Segment]
+    var width: CGFloat = 90
+    var height: CGFloat = 4
+
+    var body: some View {
+        let gap: CGFloat = 1
+        let usable = width - gap * CGFloat(max(0, segments.count - 1))
+        HStack(spacing: gap) {
+            ForEach(segments) { s in
+                Capsule().fill(s.tint)
+                    .frame(width: max(2, usable * min(1, max(0, s.fraction))), height: height)
+            }
+        }
+        .frame(width: width, alignment: .leading)
+        .clipped()
+    }
+}
+
 /// One clickable bar in the per-day chart: a wide invisible hit area (easy to target), a hover
 /// highlight + pointing-hand cursor (so it reads as interactive), and a selected/today accent.
+/// `slot` is the column's pitch (hit area + gap); the bar itself takes about half of it, capped at the
+/// original 7 pt so a short history still looks as before.
 private struct BarColumn: View {
     enum BarState { case normal, today, selected }
     let fraction: Double
     let state: BarState
     let tooltip: String
+    var slot: CGFloat = 15
     let onTap: () -> Void
     @State private var hovering = false
+
+    private var hitWidth: CGFloat { max(2, slot - 2) }
+    private var barWidth: CGFloat { max(2, min(7, (slot * 0.5).rounded())) }
 
     private var barColor: Color {
         switch state {
@@ -305,11 +461,11 @@ private struct BarColumn: View {
         ZStack(alignment: .bottom) {
             RoundedRectangle(cornerRadius: 3)
                 .fill(hovering || state == .selected ? Color.secondary.opacity(0.12) : .clear)
-                .frame(width: 13, height: 42)
+                .frame(width: hitWidth, height: 42)
             Capsule().fill(barColor)
-                .frame(width: 7, height: max(3, 38 * min(1, max(0, fraction))))
+                .frame(width: barWidth, height: max(3, 38 * min(1, max(0, fraction))))
         }
-        .frame(width: 13, height: 42, alignment: .bottom)
+        .frame(width: slot, height: 42, alignment: .bottom)
         .contentShape(Rectangle())
         .onHover { h in
             hovering = h

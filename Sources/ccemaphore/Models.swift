@@ -65,11 +65,74 @@ enum SessionState: String, Sendable {
 enum SessionHost: String, Sendable {
     case ide        // Cursor / VS Code / VSCodium (hosts the Anthropic.claude-code extension)
     case terminal   // Terminal.app / iTerm2 / Ghostty / tmux / … — Claude Code CLI in a real terminal
+    /// The Claude desktop app's Code tab (`com.anthropic.claudefordesktop`, `CLAUDE_CODE_ENTRYPOINT=
+    /// claude-desktop`). It shows its own permission card ALONGSIDE our hook, like an IDE — but the
+    /// broker's wait window for it stays behind `WidgetSettings.desktopPermissionWait` until the live
+    /// Allow/Deny interplay has been verified. Focus = `claude://code/continue?session=local_<id>`.
+    case desktop
+    /// A Codex thread running inside ChatGPT.app (`com.openai.codex`, formerly the Codex desktop app).
+    /// Codex runs hooks BEFORE it shows its own approval prompt, so blocking would hide that prompt:
+    /// never a wait window here. Focus = `codex://threads/<thread_id>`.
+    case codexApp
     /// Couldn't classify (hooks off / integrated terminal / ssh / an unlisted emulator). Fail-safe on
     /// both host-gated decisions: no permission wait window (like `.terminal` — never freeze an
     /// unclassified agent), and focus opens the project's Cursor WINDOW only — never the `cursor://`
     /// chat-tab deep-link, which would RESUME (fork) a session that isn't actually open in Cursor.
     case unknown
+}
+
+extension SessionHost {
+    /// Codex's `originator` (rollout `session_meta`, catalog column) → host. `Codex Desktop` /
+    /// `codex_work_desktop` = the ChatGPT app; `codex-tui` / `codex exec` / `…cli` = a terminal. nil for an
+    /// absent or unlisted originator, so a second source can still decide.
+    static func fromCodexOriginator(_ originator: String?) -> SessionHost? {
+        guard let o = originator?.lowercased(), !o.isEmpty else { return nil }
+        if o.contains("desktop") { return .codexApp }
+        if o.contains("tui") || o.contains("cli") || o.contains("exec") { return .terminal }
+        return nil
+    }
+}
+
+/// Which coding agent a session belongs to. `claude` = Claude Code (CLI / IDE extension / desktop app);
+/// `codex` = OpenAI Codex (the ChatGPT.app Codex surface, or the Codex CLI/TUI). Drives the row badge,
+/// which reader produced the session, and which deep link opens it.
+enum AgentKind: String, Sendable, Codable, CaseIterable {
+    case claude, codex
+}
+
+/// Why a `waiting` chat is waiting, when the source knows (Claude Code's session registry reports
+/// `waitingFor` = "permission prompt" | "input needed"; hooks report `permission-native` /
+/// `question-native`). Decorates `.waiting` — never a 5th traffic-light colour.
+enum WaitingKind: String, Sendable {
+    case permission, input
+}
+
+/// A sub-agent / child session folded under its parent chat (the expandable row in the panel). Claude:
+/// `Task` sub-agent transcripts (`…/subagents/agent-*.jsonl`) and workflow fan-out agents; Codex: child
+/// threads from `thread_spawn_edges` (named by their agent nickname). Informational — a child never
+/// drives the light on its own; its parent's state already folds it in.
+struct ChildAgent: Identifiable, Sendable, Equatable {
+    enum Kind: String, Sendable { case subagent, workflow, codexSubagent }
+    let id: String
+    let name: String
+    let kind: Kind
+    var state: SessionState
+    var lastActivity: Date
+    var title: String? = nil
+}
+
+/// Account-level usage limits as the agent itself reports them (Codex writes `rate_limits` into every
+/// `token_count` event: a primary window — typically 5 h — and a secondary weekly one). Percent used +
+/// when the window resets. Claude Code exposes no local equivalent today, so this is Codex-only for now.
+struct RateLimitInfo: Sendable, Equatable {
+    struct Window: Sendable, Equatable {
+        let usedPercent: Double
+        let windowMinutes: Int?
+        let resetsAt: Date?
+    }
+    let primary: Window?
+    let secondary: Window?
+    let observedAt: Date
 }
 
 /// Aggregate menu-bar color across all live sessions. Precedence: working > waiting > done > none.
@@ -107,27 +170,65 @@ struct ContextInfo: Sendable, Equatable {
 }
 
 /// One chat (session) inside a day's history breakdown. Tokens/cost come from `ccusage session`;
-/// `project`/`title` are recovered from the transcript by UUID (ccusage doesn't carry them).
+/// `project`/`title` are recovered from the transcript by UUID (ccusage doesn't carry them). A Codex
+/// thread is keyed by its namespaced id (`SessionInfo.codexID`) and labelled from Codex's thread catalog.
 struct ChatStat: Identifiable, Sendable, Equatable {
-    let sessionId: String     // ccusage session `period` (the UUID)
+    let sessionId: String     // Claude: ccusage session `period` (the UUID); Codex: `codex:<thread_id>`
     let project: String       // last path component of cwd, or slug fallback
     let title: String?        // aiTitle → lastPrompt → nil (shown as "(untitled)")
     let tokens: Int
     let cost: Double
     let models: [String]      // ccusage `modelsUsed`
     let lastActivity: Date
+    var agent: AgentKind = .claude
     var id: String { sessionId }
 }
 
+/// One agent's share of a day (tokens + cost) — see `DayStat.byAgent`.
+struct TokenShare: Sendable, Equatable {
+    var tokens: Int = 0
+    var cost: Double = 0
+
+    static func + (a: TokenShare, b: TokenShare) -> TokenShare {
+        TokenShare(tokens: a.tokens + b.tokens, cost: a.cost + b.cost)
+    }
+}
+
 /// One day in the history view. `totalTokens`/`costUsd` are the authoritative per-day numbers from
-/// `ccusage daily`; `chats` is the per-session breakdown grouped by each session's last activity.
+/// `ccusage daily` (every agent together); `byAgent` is the day's Claude / Codex split when ccusage
+/// reports one (`--by-agent`); `chats` is the per-session breakdown grouped by each session's last activity.
 struct DayStat: Identifiable, Sendable, Equatable {
     let date: String          // "YYYY-MM-DD" (local)
     var chatCount: Int
     var totalTokens: Int
     var costUsd: Double
     var chats: [ChatStat] = []
+    var byAgent: [AgentKind: TokenShare] = [:]
     var id: String { date }
+
+    /// The agents that did something this day, in display order — from the split when known, else
+    /// from the chats.
+    var agents: [AgentKind] {
+        AgentKind.allCases.filter { share(of: $0) != nil }
+    }
+
+    /// This day's share for one agent: ccusage's split when present, else the sum of that agent's chats.
+    /// nil ⇒ the agent did nothing that day.
+    func share(of agent: AgentKind) -> TokenShare? {
+        if let s = byAgent[agent] { return s.tokens > 0 || s.cost > 0 ? s : nil }
+        let mine = chats.filter { $0.agent == agent }
+        guard !mine.isEmpty else { return nil }
+        return TokenShare(tokens: mine.reduce(0) { $0 + $1.tokens }, cost: mine.reduce(0) { $0 + $1.cost })
+    }
+
+    /// The day narrowed to one agent (the History window's agent filter); nil when that agent did
+    /// nothing that day, so the day drops out of the filtered list.
+    func restricted(to agent: AgentKind) -> DayStat? {
+        guard let s = share(of: agent) else { return nil }
+        let mine = chats.filter { $0.agent == agent }
+        return DayStat(date: date, chatCount: mine.count, totalTokens: s.tokens, costUsd: s.cost,
+                       chats: mine, byAgent: [agent: s])
+    }
 }
 
 /// UI-facing snapshot of one live session.
@@ -137,10 +238,12 @@ struct SessionInfo: Identifiable, Sendable {
     /// `StateEngine`'s id-keyed merge — minted/parsed ONLY through `remoteID`/`parseRemoteID` below, so
     /// the poller and the permission relay can never produce differently-shaped keys.
     let id: String            // sessionId (uuid)
-    let project: String       // last path component of cwd (fallback: slug-derived)
+    /// Last path component of cwd (fallback: slug-derived). `var`: the session registry's launch folder
+    /// replaces a transcript-derived one that wandered into a sub-repo after `cd` (see StateEngine).
+    var project: String
     var cwd: String? = nil    // full project path — for `cursor -r <cwd>` deep-link
     let gitBranch: String?
-    let title: String?        // aiTitle / lastPrompt
+    var title: String?        // aiTitle / lastPrompt; `var`: a user-given registry name overrides it
     var state: SessionState   // var: the mode-B status overlay can override mode A
     var lastActivity: Date
     var tokens: TokenUsage? = nil   // filled in by StateEngine from UsageProvider (join: id == ccusage period)
@@ -185,6 +288,52 @@ struct SessionInfo: Identifiable, Sendable {
     /// `aggregate`) and the UI marks it "offline" rather than showing a stale colour. Set by
     /// `StateEngine.render()` from the poller's per-host `connected` flag; always false for local sessions.
     var isOffline: Bool = false
+    /// Which agent runs this chat (which reader produced it): Claude Code or Codex. Default `.claude`
+    /// keeps every existing Claude-side constructor unchanged. See `AgentKind`.
+    var agent: AgentKind = .claude
+    /// Where the chat ORIGINATED — the row badge. Equals `agent` except for a Codex thread that was
+    /// imported from Claude Code (ChatGPT.app's "Import" feature): the user asked that such a thread keep
+    /// its Claude badge while its host icon still says ChatGPT.app. Defaulted to `agent` lazily via
+    /// `originAgent`, so callers that never set it stay correct.
+    var origin: AgentKind? = nil
+    var originAgent: AgentKind { origin ?? agent }
+    /// Why a `.waiting` chat waits, when the source knows (session registry `waitingFor`, hook events).
+    var waitingKind: WaitingKind? = nil
+    /// A background Claude Code agent (`claude --bg`, registry `kind == "bg"`) — shown as its own row
+    /// with a marker; daemons (`daemon`/`daemon-worker`) are never listed.
+    var isBackground: Bool = false
+    /// Sub-agents / child sessions for the expandable row (see `ChildAgent`). Empty for most chats.
+    var children: [ChildAgent] = []
+    /// The transcript fold forced this chat `working` because a Task sub-agent (within its grace) or a
+    /// workflow (until its completion record) is still running — even though the chat's OWN tail looks
+    /// settled. Lets the registry layer keep such a chat yellow when the main agent reports `idle`.
+    var workingViaChildren: Bool = false
+    /// Account usage limits as reported by the agent (Codex `rate_limits`); nil when unknown.
+    var rateLimits: RateLimitInfo? = nil
+    /// Opaque host-side session handle, when the host has one distinct from the transcript id: the Claude
+    /// desktop app's `local_<uuid>` (`CLAUDE_CODE_HOST_SESSION_ID`, also the registry's `hostSessionId`),
+    /// which its `claude://code/continue?session=` deep link expects. nil elsewhere.
+    var hostSessionId: String? = nil
+    /// The product group this chat falls under (see `ProductGroups`), stamped by `StateEngine.render()`.
+    /// nil ⇒ ungrouped. Drives the "by product" panel mode and the `root › sub-repo` row label.
+    var productRoot: String? = nil
+    /// The group was auto-suggested (two sibling repos with live chats), not chosen by the user or by a
+    /// Codex project — such groups only reshape the list in "by product" mode, never the default rows.
+    var productGroupIsAuto: Bool = false
+
+    var isCodex: Bool { agent == .codex }
+
+    /// The one owner of the `"codex:<thread_id>"` namespaced-id format for Codex threads (and its
+    /// inverse) — the same discipline as `remoteID`/`parseRemoteID`: every Codex reader and the hook
+    /// status path mint the id through here, so a Codex key can never collide with a Claude uuid or a
+    /// remote id in `StateEngine`'s one id-keyed merge. Codex thread ids are UUIDv7 (no `:`).
+    static func codexID(threadId: String) -> String { "codex:\(threadId)" }
+
+    static func parseCodexID(_ id: String) -> String? {
+        guard id.hasPrefix("codex:") else { return nil }
+        let rest = String(id.dropFirst("codex:".count))
+        return rest.isEmpty ? nil : rest
+    }
 
     var dot: String {
         switch state {

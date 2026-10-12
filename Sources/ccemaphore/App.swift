@@ -17,14 +17,23 @@ enum Entry {
         // Hook invocation: `ccemaphore --hook <event>` — read stdin, write status, exit (no GUI).
         if let i = args.firstIndex(of: "--hook"), i + 1 < args.count {
             let event = args[i + 1]
+            // `--agent codex` marks a Codex hook (appended by `CodexHooksInstaller`); absent ⇒ Claude Code.
+            let agent = args.firstIndex(of: "--agent").flatMap { j in
+                j + 1 < args.count ? AgentKind(rawValue: args[j + 1]) : nil
+            } ?? .claude
             switch event {
             // Blocking permission broker. `permission-request` (PermissionRequest) is the precise path;
             // `permission` (PreToolUse) is kept for already-installed legacy configs.
-            case "permission-request": PermissionBroker.runHook(event: .permissionRequest)
-            case "permission":         PermissionBroker.runHook(event: .preToolUse)
-            default:                   HookHandler.run(event)
+            case "permission-request": PermissionBroker.runHook(event: .permissionRequest, agent: agent)
+            case "permission":         PermissionBroker.runHook(event: .preToolUse, agent: agent)
+            default:                   HookHandler.run(event, agent: agent)
             }
             return
+        }
+        // Relaunch watchdog, spawned detached by the updater right before the app quits to install or
+        // restart (`UpdateSupport.spawnRelaunchWatchdog`). Headless: never touches AppKit/LaunchServices.
+        if args.contains("--relaunch-watchdog") {
+            exit(UpdateSupport.runRelaunchWatchdog(args))
         }
         if args.contains("--help") || args.contains("-h") {
             printUsage()
@@ -39,6 +48,30 @@ enum Entry {
             Diagnostic.probe(args[i + 1])
             return
         }
+        if args.contains("--registry-dump") {
+            SessionRegistryReader.dump()
+            return
+        }
+        if args.contains("--groups-dump") {
+            ProductGroups.dump()
+            return
+        }
+        if args.contains("--usage-dump") {
+            Task { await Diagnostic.usageDump(); exit(0) }
+            dispatchMain()
+        }
+        if args.contains("--codex-scan") {
+            Task { await CodexDiagnostic.scan(); exit(0) }
+            dispatchMain()
+        }
+        if let i = args.firstIndex(of: "--codex-probe"), i + 1 < args.count {
+            CodexDiagnostic.probe(args[i + 1])
+            return
+        }
+        if args.contains("--codex-db-probe") {
+            CodexDiagnostic.dbProbe()
+            return
+        }
         if args.contains("--check-perm") {
             Diagnostic.checkPermission()
             return
@@ -48,6 +81,7 @@ enum Entry {
             return
         }
         if args.contains("--install-hooks") {
+            refuseHookInstallFromTransientLocation("--install-hooks")
             do { try HooksInstaller.install(); print("hooks installed → \(HooksInstaller.settingsPath)") }
             catch { print("install failed: \(error.localizedDescription)") }
             return
@@ -61,6 +95,23 @@ enum Entry {
             print("installed: \(HooksInstaller.isInstalled())  (\(HooksInstaller.settingsPath))")
             return
         }
+        if args.contains("--install-codex-hooks") {
+            refuseHookInstallFromTransientLocation("--install-codex-hooks")
+            do { try CodexHooksInstaller.install(); print("codex hooks installed → \(CodexHooksInstaller.hooksPath)") }
+            catch { print("install failed: \(error.localizedDescription)") }
+            print("trust: \(CodexHooksInstaller.trustState())")
+            return
+        }
+        if args.contains("--uninstall-codex-hooks") {
+            do { try CodexHooksInstaller.uninstall(); print("codex hooks removed → \(CodexHooksInstaller.hooksPath)") }
+            catch { print("uninstall failed: \(error.localizedDescription)") }
+            return
+        }
+        if args.contains("--codex-hooks-status") {
+            print("installed: \(CodexHooksInstaller.isInstalled())  permission: \(CodexHooksInstaller.isPermissionHookInstalled())  "
+                  + "trust: \(CodexHooksInstaller.trustState())  (\(CodexHooksInstaller.hooksPath))")
+            return
+        }
         if args.contains("--ax-dump") {
             FocusResolver.axDump()
             return
@@ -71,6 +122,10 @@ enum Entry {
         }
         if args.contains("--presence-dump") {
             AppPresence.dump()
+            return
+        }
+        if args.contains("--update-status") {
+            UpdateSupport.printStatus()
             return
         }
         if args.contains("--trusted-dump") {
@@ -177,6 +232,21 @@ enum Entry {
         CcemaphoreApp.main()
     }
 
+    /// The same rule the GUI applies (`StateEngine.refuseHookInstallFromTransientLocation`): installing from
+    /// the mounted DMG or an App Translocation copy would bake a path into settings.json / hooks.json that
+    /// vanishes once the DMG is ejected, and every hook would then fail (exit 127). Exits 1 in that case.
+    private static func refuseHookInstallFromTransientLocation(_ flag: String) {
+        guard UpdateSupport.isTransientLocation() else { return }
+        FileHandle.standardError.write(Data("""
+            ccemaphore: \(flag) refused — this copy runs from a transient location (\(Bundle.main.bundlePath)):
+            the mounted disk image or an App Translocation copy. The hook command would point at a path that
+            disappears once the disk image is ejected, and every hook would then fail.
+            Move ccemaphore.app to /Applications, open it once from there, and run this again.
+
+            """.utf8))
+        exit(1)
+    }
+
     private static func printUsage() {
         print("""
         ccemaphore — menu-bar traffic light for Claude Code sessions.
@@ -188,12 +258,20 @@ enum Entry {
         Diagnostics:
           ccemaphore --scan          One-shot classification pass over ~/.claude/projects, then exit.
           ccemaphore --probe <file>  Dump the heuristic's per-stage result for one .jsonl transcript.
+          ccemaphore --registry-dump Print Claude Code's live session registry (~/.claude/sessions).
+          ccemaphore --groups-dump   Print the product groups (manual + Codex projects).
+          ccemaphore --usage-dump    Run ccusage once; print per-day totals with the Claude/Codex split.
+          ccemaphore --codex-scan    One-shot pass over Codex's ~/.codex (catalog + rollouts), then exit.
+          ccemaphore --codex-probe <rollout.jsonl>
+                                     Per-stage result for one Codex rollout transcript.
           ccemaphore --check-perm    Read a PreToolUse JSON payload from stdin; print whether the
                                      permission broker would skip it (Claude auto-resolves → no banner).
           ccemaphore --perm-diag     Print the raw payload last captured for each permission hook event
                                      (PreToolUse / PermissionRequest) — confirms the event fires + shape.
           ccemaphore --status-dump   Print the current mode-B hook status files.
           ccemaphore --presence-dump Print the GUI presence beacon + the permission hook's readiness verdict.
+          ccemaphore --update-status Print the in-app updater's gates, Info.plist keys and saved state
+                                     (signature, location, feed, mode, last check) — no network.
           ccemaphore --trusted-dump  Print the user's trusted-command auto-allow list (trusted.json).
           ccemaphore --ide-log-probe [toolUseId]
                                      List the Cursor/VS Code extension logs the IDE-log watcher would
@@ -208,6 +286,13 @@ enum Entry {
           ccemaphore --uninstall-hooks      Remove everything ccemaphore added.
           ccemaphore --hooks-status         Report whether the hooks are installed.
 
+        Codex hooks (edit ~/.codex/hooks.json; Codex must then TRUST the file — review it in the
+        ChatGPT app's Codex settings or with /hooks in the Codex CLI):
+          ccemaphore --install-codex-hooks     Install the Codex status + permission hooks.
+          ccemaphore --uninstall-codex-hooks   Remove everything ccemaphore added to hooks.json.
+          ccemaphore --codex-hooks-status      Report install + trust state.
+          ccemaphore --codex-db-probe          Low-level SQLite open/prepare probe of the Codex catalog.
+
         Remote hosts (SSH — configured from the in-app "Remote Hosts" section; <host> is an id or label):
           ccemaphore --remote-hosts-dump           Print the configured remote host list.
           ccemaphore --remote-ping <host>          Test connectivity + detect platform (uname -s).
@@ -217,8 +302,11 @@ enum Entry {
           ccemaphore --remote-install-hooks <host>    Deploy the hook shim + install remote hooks.
           ccemaphore --remote-uninstall-hooks <host>  Remove everything ccemaphore added remotely.
 
-        Internal (invoked by Claude Code, not by hand):
-          ccemaphore --hook <event>         Handle a hook event from stdin.
+        Internal (invoked by Claude Code / Codex / the app itself, not by hand):
+          ccemaphore --hook <event> [--agent codex]   Handle a hook event from stdin.
+          ccemaphore --relaunch-watchdog <pid> <bundle> <install|restart> [--dry-run]
+                                     Wait for the app (and Sparkle's installer) to finish, then reopen
+                                     the app if nothing relaunched it. --dry-run only reports.
         """)
     }
 }

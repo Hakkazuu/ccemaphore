@@ -33,9 +33,16 @@ enum Diagnostic {
     static func l10nCheck() {
         let sampleKeys = [
             "menu.quit", "popover.noActiveSessions", "settings.hooks.title",
+            "history.filter.all", "history.filter.label",
             "settings.permission.subtitle.off", "perm.allInChat", "history.title", "reset.done",
             "status.compacting", "settings.trusted.section", "settings.trusted.empty",
-            "panel.claudeMissing",
+            "panel.claudeMissing", "host.desktop", "host.codexApp", "row.waiting.input",
+            "settings.codex.title", "settings.registry.title", "settings.groups.section", "limits.codex.title",
+            "update.consent.title", "update.action.automatic", "update.checking", "update.failed.network.title",
+            "update.blockedByPermission", "settings.updates.section", "settings.updates.privacy",
+            "menubar.update.check", "settings.hooks.blockedTransient", "menubar.showLight",
+            "update.available.downloaded.body", "update.ready.body.restart", "update.ready.body.waiting",
+            "update.installing.waiting", "a11y.expanded",
         ]
         defer { Loc.setOverride(nil) }
         for code in Loc.supported {
@@ -44,8 +51,15 @@ enum Diagnostic {
             print("\n=== \(code)\(missing ? "   [!! strings NOT found in bundle]" : "") ===")
             for k in sampleKeys { print("  \(k) = \(L(k))") }
             print("  count.working(3) = \(Lf("count.working", 3))")
+            print("  update.available.title(1.3.1) = \(Lf("update.available.title", "1.3.1"))   menubar.update.restart(1.3.1) = \(Lf("menubar.update.restart", "1.3.1"))")
+            print("  settings.updates.lastCheck(-2h) = \(Lf("settings.updates.lastCheck", Fmt.relative(Date().addingTimeInterval(-2 * 3600))))"
+                  + "   (now) = \(Lf("settings.updates.lastCheck", Fmt.relative(Date())))")
+            print("  update.incompatible.newerMacOS(1.4.0, 14.0) = \(Lf("update.incompatible.newerMacOS", "1.4.0", "14.0"))"
+                  + "   appleSilicon(1.4.0) = \(Lf("update.incompatible.appleSilicon", "1.4.0"))")
+            print("  update.incompatible.body(1.3.0) = \(Lf("update.incompatible.body", "1.3.0"))"
+                  + "   menubar.update.install(1.3.1) = \(Lf("menubar.update.install", "1.3.1"))")
             for n in [1, 2, 5, 21, 22] {
-                print("  chats(\(n)) = \(Lcount("noun.chats", n))   days(\(n)) = \(Lcount("noun.days", n))   retention=\(Lcount("noun.daysShort", n))")
+                print("  chats(\(n)) = \(Lcount("noun.chats", n))   days(\(n)) = \(Lcount("noun.days", n))   retention=\(Lcount("noun.daysShort", n))   subagents=\(Lcount("noun.subagents", n))")
             }
             print("  dayFull(2026-06-30) = \(Fmt.dayFull("2026-06-30"))")
             print("  resetIn(+4h19m) = \(Fmt.resetIn(Date().addingTimeInterval(4 * 3600 + 19 * 60)))")
@@ -87,7 +101,7 @@ enum Diagnostic {
     /// hook event fired (PreToolUse / PermissionRequest). Confirms a host (Cursor, terminal…) actually
     /// delivers the event, and shows its exact field shape. "(never fired)" ⇒ no capture yet.
     static func permDiag() {
-        for event in ["PreToolUse", "PermissionRequest"] {
+        for event in ["PreToolUse", "PermissionRequest", "PermissionRequest-codex"] {
             let path = (PermissionBroker.diagDir as NSString).appendingPathComponent("permission-\(event).json")
             print("\n=== \(event)  (\(path)) ===")
             guard let data = FileManager.default.contents(atPath: path), !data.isEmpty else {
@@ -107,6 +121,37 @@ enum Diagnostic {
         }
     }
 
+    /// `ccemaphore --usage-dump` — run the ccusage adapter once and print what the History window
+    /// would show: per-day totals with the Claude/Codex split and the chats per agent, plus the Codex
+    /// join keys (`codex:<thread_id>`) with their catalog labels. Verifies the unified ccusage ≥ 20
+    /// contract headlessly.
+    static func usageDump() async {
+        let usage = UsageProvider()
+        await usage.refresh()
+        let days = await usage.days
+        let bySession = await usage.bySession
+        let codexKeys = bySession.keys.filter { SessionInfo.parseCodexID($0) != nil }.sorted()
+        func money(_ d: Double) -> String { String(format: "$%.2f", d) }
+        print("ccusage sessions: \(bySession.count) (codex \(codexKeys.count))   days: \(days.count)")
+        for d in days.prefix(14) {
+            let split = AgentKind.allCases.compactMap { a in
+                d.share(of: a).map { "\(a.rawValue)=\($0.tokens)/\(money($0.cost))" }
+            }.joined(separator: " ")
+            let chats = AgentKind.allCases.map { a in
+                "\(a.rawValue):\(d.chats.filter { $0.agent == a }.count)"
+            }.joined(separator: " ")
+            print("\(d.date)  total=\(d.totalTokens) \(money(d.costUsd))  split[\(split)]  chats[\(chats)]")
+        }
+        if days.count > 14 { print("… \(days.count - 14) older days") }
+        let allChats = days.flatMap(\.chats)
+        for k in codexKeys.prefix(5) {
+            guard let u = bySession[k] else { continue }
+            let chat = allChats.first { $0.sessionId == k }
+            print("  \(k)  tokens=\(u.totalTokens) \(money(u.costUsd))  project=\(chat?.project ?? "?")  title=\(chat?.title ?? "—")")
+        }
+        if codexKeys.count > 5 { print("  … \(codexKeys.count - 5) more Codex threads") }
+    }
+
     /// Async so the entry point can drive it with structured concurrency (no semaphore/box bridge).
     static func run() async {
         let store = SessionStore()
@@ -119,17 +164,30 @@ enum Diagnostic {
         let days = await usage.days
 
         let now = Date()
+        let registry = SessionRegistryReader.readAll()
         print("scanned \(paths.count) *.jsonl files under \(SessionPath.projectsRoot)")
-        print("aggregate: \(aggregate(sessions).rawValue)")
+        print("aggregate (transcripts only): \(aggregate(sessions).rawValue)   registry live entries: \(registry.count)")
         print("live sessions: \(sessions.count)")
         for s in sessions {
             let age = Int(now.timeIntervalSince(s.lastActivity))
-            let branch = s.gitBranch ?? "-"
             let u = usageBySession[s.id]
             let tok = u.map { "  tokens=\($0.totalTokens) $\(String(format: "%.2f", $0.costUsd))" } ?? "  tokens=?(no ccusage match)"
             let label = s.isCompacting ? "compact" : s.state.rawValue
+            // The registry overlay the engine applies: Claude Code's own status for this session, if it runs.
+            let reg = registry[s.id].map { e in
+                "  registry=\(e.status?.rawValue ?? "?")\(e.waitingFor.map { "/\($0)" } ?? "") host=\(e.host.rawValue)"
+            } ?? ""
+            let kids = s.children.isEmpty ? "" : "  children=\(s.children.count)(\(s.children.filter { $0.state == .working }.count) working)"
             print("  [\(label.padding(toLength: 7, withPad: " ", startingAt: 0))] "
-                  + "\(s.displayName)  age=\(age)s  id=\(s.id.prefix(8))\(tok)")
+                  + "\(s.displayName)  age=\(age)s  id=\(s.id.prefix(8))\(tok)\(reg)\(kids)")
+        }
+        let unseen = registry.values.filter { e in !sessions.contains { $0.id == e.sessionId } && !e.isHidden }
+        if !unseen.isEmpty {
+            print("registry entries without a live transcript (engine lists busy/waiting/recent ones):")
+            for e in unseen.sorted(by: { ($0.statusUpdatedAt ?? .distantPast) > ($1.statusUpdatedAt ?? .distantPast) }) {
+                let age = e.statusUpdatedAt.map { "\(Int(now.timeIntervalSince($0)))s" } ?? "?"
+                print("  \(e.status?.rawValue ?? "?")  \((e.cwd as NSString).lastPathComponent)  age=\(age)  host=\(e.host.rawValue)  id=\(e.sessionId.prefix(8))")
+            }
         }
         print("\ndaily history (\(days.count) days):")
         for d in days.prefix(5) {

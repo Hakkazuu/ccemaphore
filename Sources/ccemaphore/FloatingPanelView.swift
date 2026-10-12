@@ -8,6 +8,13 @@ private struct PanelBodyHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
+/// Carries the measured height of the note rows between the header and the body (Claude missing, the update
+/// row), so the body's cap can make room for them.
+private struct PanelNotesHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 /// The hover-opened panel (§7): a self-contained floating window (NOT a menu dropdown). Header (status
 /// + refresh) → tab body (Чаты / Настройки) → bottom tab bar (Чаты · История · Настройки). Permission
 /// requests are handled at the light (the ribbon), not here. Visual reference:
@@ -35,20 +42,32 @@ struct FloatingPanelView: View {
     /// only past the cap.
     @State private var contentHeight: CGFloat = 160
     private let maxBodyHeight: CGFloat = 460
+    /// Measured height of the note rows above the body. They count against `maxBodyHeight`, so the whole panel
+    /// keeps the height the cap was chosen for: an update row with its release notes open is ~250 pt, and on
+    /// top of a full body it pushed the tab bar off a short screen. The body keeps at least `minBodyHeight`.
+    @State private var notesHeight: CGFloat = 0
+    private let minBodyHeight: CGFloat = 160
+
+    /// Which section's hook rows the user touched last — where a refused or failed hook op is explained.
+    private enum HookScope { case claude, codex }
+    @State private var hookErrorScope: HookScope = .claude
 
     /// Add-form state for the "Доверенные команды" section (auto-allow list).
     @State private var newTrustedTool = "Bash"
     @State private var newTrustedPattern = ""
+    /// Add-form state for the "Группы продуктов" section.
+    @State private var newGroupRoot = ""
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            if !engine.claudeInstalled { claudeMissingNote }
+            notes
             ScrollView {
                 VStack(spacing: 0) {
                     switch tab {
                     case .chats:
-                        statusGroups
+                        sessionList
+                        codexLimitsNote
                         activityNote
                     case .settings:
                         settingsScreen
@@ -59,7 +78,7 @@ struct FloatingPanelView: View {
                     Color.clear.preference(key: PanelBodyHeightKey.self, value: geo.size.height)
                 })
             }
-            .frame(height: min(contentHeight, maxBodyHeight))
+            .frame(height: min(contentHeight, max(minBodyHeight, maxBodyHeight - notesHeight)))
             .onPreferenceChange(PanelBodyHeightKey.self) { contentHeight = $0 }
             tabBar
         }
@@ -122,6 +141,87 @@ struct FloatingPanelView: View {
         return parts.isEmpty ? L("popover.noActiveSessions") : parts.joined(separator: " · ")
     }
 
+    // MARK: - Session list (by status, or by product)
+
+    @ViewBuilder
+    private var sessionList: some View {
+        switch settings.grouping {
+        case .status:  statusGroups
+        case .product: productGroupsList
+        }
+    }
+
+    private struct ProductSection: Identifiable {
+        let id: String        // group root, or "__other"
+        let label: String
+        let items: [SessionInfo]
+        /// Worst state inside (waiting < working < done) — sections with something red float up.
+        var urgency: Int { items.map { $0.state == .waiting ? 0 : $0.state == .working ? 1 : 2 }.min() ?? 3 }
+    }
+
+    /// Product mode: one section per group that has live chats (ungrouped chats under "Other"), sections
+    /// ordered red-first then by name, rows sorted by status inside each.
+    private var productSections: [ProductSection] {
+        var byRoot: [String: [SessionInfo]] = [:]
+        var other: [SessionInfo] = []
+        for s in engine.sessions {
+            if let r = s.productRoot { byRoot[r, default: []].append(s) } else { other.append(s) }
+        }
+        var out = engine.productGroups.compactMap { g -> ProductSection? in
+            guard let items = byRoot[g.root] else { return nil }
+            return ProductSection(id: g.root, label: g.name, items: sortedForDisplay(items))
+        }
+        out.sort { a, b in a.urgency != b.urgency ? a.urgency < b.urgency
+                   : a.label.localizedCaseInsensitiveCompare(b.label) == .orderedAscending }
+        if !other.isEmpty { out.append(ProductSection(id: "__other", label: L("group.other"), items: sortedForDisplay(other))) }
+        return out
+    }
+
+    @ViewBuilder
+    private var productGroupsList: some View {
+        ForEach(productSections) { section in
+            GroupHeader(label: section.label, count: section.items.count)
+            ForEach(section.items) { session in
+                SessionPanelRow(session: session) { onJump(session) }
+            }
+        }
+    }
+
+    /// Codex's own account limits (from the newest `token_count` any live Codex thread reported): the
+    /// 5-hour and weekly windows with used % and reset time. Windows whose reset already passed are stale
+    /// figures and are skipped; nothing shown when no live Codex thread carries limits.
+    @ViewBuilder
+    private var codexLimitsNote: some View {
+        if let text = codexLimitsText {
+            HStack(spacing: 6) {
+                AgentBadge(agent: .codex)
+                Text(L("limits.codex.title"))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(DS.textTertiary)
+                Text(text)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(DS.textSecondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+        }
+    }
+
+    private var codexLimitsText: String? {
+        guard let rl = engine.sessions.compactMap(\.rateLimits).max(by: { $0.observedAt < $1.observedAt }) else { return nil }
+        let now = Date()
+        let parts: [String] = [rl.primary, rl.secondary].compactMap { w in
+            guard let w else { return nil }
+            if let r = w.resetsAt, r < now { return nil }
+            var p = "\(w.windowMinutes.map { Fmt.windowLabel(minutes: $0) } ?? "?") \(Fmt.pct(w.usedPercent))"
+            if let r = w.resetsAt { p += " · " + Fmt.resetIn(r) }
+            return p
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "   ")
+    }
+
     // MARK: - Status groups
 
     @ViewBuilder
@@ -149,7 +249,22 @@ struct FloatingPanelView: View {
         }
     }
 
-    // MARK: - Claude-not-installed note
+    // MARK: - Note rows (Claude missing, updates)
+
+    /// The note rows between the header and the body: Claude Code missing, then the update row (every
+    /// `UpdatePhase` but idle). Outside the tab switch, so they show on Чаты and Настройки alike. The update row
+    /// observes `AppUpdater` itself and renders nothing while idle — so a download's progress ticks re-render
+    /// just that row, not this whole panel. Measured, so the body's cap makes room for them (`notesHeight`).
+    private var notes: some View {
+        VStack(spacing: 0) {
+            if !engine.claudeInstalled { claudeMissingNote }
+            UpdateNoteRow(updater: .shared, engine: engine)
+        }
+        .background(GeometryReader { geo in
+            Color.clear.preference(key: PanelNotesHeightKey.self, value: geo.size.height)
+        })
+        .onPreferenceChange(PanelNotesHeightKey.self) { notesHeight = $0 }
+    }
 
     /// Shown while `~/.claude/projects` doesn't exist (Claude Code never installed/run — see
     /// `StateEngine.claudeInstalled`). Sits between the header and the tab body, OUTSIDE the tab
@@ -201,8 +316,17 @@ struct FloatingPanelView: View {
             CollapsibleSection(id: "app", label: L("settings.section.app")) {
                 appSectionBody
             }
+            CollapsibleSection(id: "updates", label: L("settings.updates.section")) {
+                UpdateSettingsSection(updater: .shared)
+            }
+            CollapsibleSection(id: "codex", label: L("settings.codex.section")) {
+                codexSectionBody
+            }
             CollapsibleSection(id: "trusted", label: L("settings.trusted.section")) {
                 trustedSectionBody
+            }
+            CollapsibleSection(id: "groups", label: L("settings.groups.section")) {
+                groupsSectionBody
             }
             CollapsibleSection(id: "remote", label: L("remote.menu.title")) {
                 RemoteHostsView(engine: engine, embedded: true)
@@ -223,7 +347,10 @@ struct FloatingPanelView: View {
                 label: L("settings.hooks.title"),
                 subtitle: L("settings.hooks.subtitle"),
                 state: .onOff(engine.hooksInstalled),
-                action: { engine.hooksInstalled ? engine.uninstallHooks() : engine.installHooks() }
+                action: {
+                    hookErrorScope = .claude
+                    engine.hooksInstalled ? engine.uninstallHooks() : engine.installHooks()
+                }
             )
             SettingsAppRow(
                 label: L("settings.permission.title"),
@@ -234,9 +361,11 @@ struct FloatingPanelView: View {
                 enabled: engine.hooksInstalled,
                 action: {
                     guard engine.hooksInstalled else { return }
+                    hookErrorScope = .claude
                     engine.permissionHookInstalled ? engine.uninstallPermissionHook() : engine.installPermissionHook()
                 }
             )
+            hookErrorNote(.claude)
             SettingsAppRow(
                 label: L("settings.idelog.title"),
                 // Same pattern as the permission row above: a dimmed row must say WHY it's gated and
@@ -252,6 +381,118 @@ struct FloatingPanelView: View {
                     engine.updateIDELogWatch()
                 }
             )
+            SettingsAppRow(
+                label: L("settings.registry.title"),
+                subtitle: L("settings.registry.subtitle"),
+                state: .onOff(settings.useSessionRegistry),
+                action: { settings.useSessionRegistry.toggle(); engine.forceRefresh() }
+            )
+            SettingsAppRow(
+                label: L("settings.desktopWait.title"),
+                subtitle: engine.permissionHookInstalled
+                    ? L("settings.desktopWait.subtitle")
+                    : L("settings.idelog.subtitle.needHook"),
+                state: .onOff(settings.desktopPermissionWait),
+                enabled: engine.permissionHookInstalled,
+                action: {
+                    guard engine.permissionHookInstalled else { return }
+                    settings.desktopPermissionWait.toggle()
+                }
+            )
+        }
+    }
+
+    // MARK: Codex (ChatGPT app)
+
+    /// The Codex section: one toggle for mode A over ~/.codex, with a caption that says whether Codex is
+    /// present at all and how many of its threads are live right now. (Codex hooks land here in phase 3.)
+    private var codexSectionBody: some View {
+        VStack(spacing: 0) {
+            SettingsAppRow(
+                label: L("settings.codex.title"),
+                subtitle: !engine.codexInstalled
+                    ? L("settings.codex.subtitle.missing")
+                    : settings.codexEnabled
+                        ? Lf("settings.codex.subtitle.on", engine.sessions.filter(\.isCodex).count)
+                        : L("settings.codex.subtitle.off"),
+                state: .onOff(settings.codexEnabled && engine.codexInstalled),
+                enabled: engine.codexInstalled,
+                action: {
+                    guard engine.codexInstalled else { return }
+                    engine.setCodexEnabled(!settings.codexEnabled)
+                }
+            )
+            SettingsAppRow(
+                label: L("settings.codex.hooks.title"),
+                subtitle: L("settings.codex.hooks.subtitle"),
+                state: .onOff(engine.codexHooksInstalled),
+                enabled: engine.codexInstalled,
+                action: {
+                    guard engine.codexInstalled else { return }
+                    hookErrorScope = .codex
+                    engine.codexHooksInstalled ? engine.uninstallCodexHooks() : engine.installCodexHooks()
+                }
+            )
+            SettingsAppRow(
+                label: L("settings.codex.permission.title"),
+                subtitle: engine.codexHooksInstalled
+                    ? L("settings.codex.permission.subtitle")
+                    : L("settings.permission.subtitle.off"),
+                state: .onOff(engine.codexPermissionHookInstalled),
+                enabled: engine.codexHooksInstalled,
+                action: {
+                    guard engine.codexHooksInstalled else { return }
+                    hookErrorScope = .codex
+                    engine.codexPermissionHookInstalled ? engine.uninstallCodexPermissionHook() : engine.installCodexPermissionHook()
+                }
+            )
+            hookErrorNote(.codex)
+            if engine.codexHooksInstalled || engine.codexPermissionHookInstalled {
+                SettingsAppRow(label: L("settings.codex.trust.title"), subtitle: codexTrustCaption) {
+                    Image(systemName: engine.codexHooksTrust == .trusted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(engine.codexHooksTrust == .trusted ? DS.green : DS.ctxWarning)
+                }
+            }
+        }
+    }
+
+    // MARK: Hook errors
+
+    /// Why the last hook install / removal didn't happen — refused because ccemaphore runs from the disk image
+    /// or a translocated copy (the hooks would point into a location that disappears), or settings.json /
+    /// hooks.json couldn't be written. Shown under the hook rows the user touched last; gone once an op
+    /// succeeds (`StateEngine.runHookOp` clears it).
+    @ViewBuilder
+    private func hookErrorNote(_ scope: HookScope) -> some View {
+        if hookErrorScope == scope, let text = hookErrorText {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(DS.ctxWarning)
+                    .accessibilityHidden(true)
+                Text(text)
+                    .font(.system(size: 10))
+                    .foregroundStyle(DS.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 2)
+            .padding(.bottom, 6)
+        }
+    }
+
+    /// Rendered on every body pass, so a language switch re-resolves it.
+    private var hookErrorText: String? { engine.lastHookError?.message }
+
+    /// Where Codex's hash-bound trust stands, as a sentence the user can act on.
+    private var codexTrustCaption: String {
+        switch engine.codexHooksTrust {
+        case .trusted:      return L("settings.codex.trust.trusted")
+        case .stale:        return L("settings.codex.trust.stale")
+        case .untrusted:    return L("settings.codex.trust.untrusted")
+        case .notInstalled: return L("settings.codex.trust.none")
         }
     }
 
@@ -263,6 +504,11 @@ struct FloatingPanelView: View {
     /// the floating-panel rebuild — `LogExport` was still complete, just no longer wired to any UI.)
     private var diagnosticsSectionBody: some View {
         VStack(spacing: 0) {
+            SettingsAppRow(label: L("diag.registry.title"), subtitle: L("diag.registry.subtitle")) {
+                Text("\(engine.registryLiveCount)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(engine.registryLiveCount > 0 ? DS.greenText : DS.textTertiary)
+            }
             SettingsAppRow(
                 label: L("settings.saveLogs"),
                 subtitle: L("settings.saveLogs.subtitle"),
@@ -276,6 +522,69 @@ struct FloatingPanelView: View {
                 action: { LogExport.revealInFinder() }
             )
         }
+    }
+
+    // MARK: Product groups
+
+    /// Grouping mode (status / product) + the effective group list (manual ✕-removable; Codex / auto
+    /// read-only) + an add-root field.
+    private var groupsSectionBody: some View {
+        VStack(spacing: 0) {
+            Text(L("settings.groups.explainer"))
+                .font(.system(size: 10))
+                .foregroundStyle(DS.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+            HStack(spacing: 6) {
+                segmentPill(L("settings.groups.mode.status"), active: settings.grouping == .status) { settings.grouping = .status }
+                segmentPill(L("settings.groups.mode.product"), active: settings.grouping == .product) { settings.grouping = .product }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+            if engine.productGroups.isEmpty {
+                Text(L("settings.groups.empty"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(DS.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 4)
+            } else {
+                ForEach(engine.productGroups) { g in
+                    ProductGroupRow(group: g, onRemove: g.source == .manual ? { engine.removeProductGroup(root: g.root) } : nil)
+                }
+            }
+            HStack(spacing: 8) {
+                TextField(L("settings.groups.placeholder"), text: $newGroupRoot)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(DS.textPrimary)
+                    .frame(maxWidth: .infinity)
+                    .onSubmit(addGroup)
+                Button(action: addGroup) {
+                    Text(L("settings.trusted.add"))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(canAddGroup ? DS.greenText : DS.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canAddGroup)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+        }
+    }
+
+    private var canAddGroup: Bool {
+        let p = ProductGroups.normalize(newGroupRoot)
+        var isDir: ObjCBool = false
+        return p.hasPrefix("/") && FileManager.default.fileExists(atPath: p, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    private func addGroup() {
+        guard canAddGroup else { return }
+        engine.addProductGroup(root: newGroupRoot)
+        newGroupRoot = ""
     }
 
     // MARK: Trusted commands (auto-allow list)
@@ -339,7 +648,7 @@ struct FloatingPanelView: View {
             Button(action: addTrusted) {
                 Text(L("settings.trusted.add"))
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(canAddTrusted ? DS.green : DS.textTertiary)
+                    .foregroundStyle(canAddTrusted ? DS.greenText : DS.textTertiary)
             }
             .buttonStyle(.plain)
             .disabled(!canAddTrusted)
@@ -408,19 +717,6 @@ struct FloatingPanelView: View {
 // MARK: - Header / row pieces
 
 /// A glowing status dot (the lamp halo from §2.4 reduced to a row-scale dot).
-private struct StatusDot: View {
-    let color: Color
-    var diameter: CGFloat = 9
-    var glow: CGFloat = 7
-
-    var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: diameter, height: diameter)
-            .shadow(color: color.opacity(0.7), radius: glow / 2)
-    }
-}
-
 /// The small graphite glyph button used in the header (collapse "▾").
 private struct PanelGlyphButton: View {
     let glyph: String
@@ -549,23 +845,39 @@ private struct CollapsibleSection<Content: View>: View {
     }
 }
 
-/// One session row, restyled to the panel mockup: glowing dot · project + branch + title · ctx% / cost.
+/// One session row, restyled to the panel mockup: glowing dot · project + branch + badges · title /
+/// waiting reason · ctx% / cost. A chat with sub-agents grows a chevron that expands its children
+/// (`ChildAgentRow`s) underneath; the expansion is remembered per session id.
 private struct SessionPanelRow: View {
     let session: SessionInfo
     let onTap: () -> Void
+    @ObservedObject private var settings = WidgetSettings.shared
     @State private var hovering = false
 
+    private var expanded: Bool { !session.children.isEmpty && settings.isSessionExpanded(session.id) }
+
     var body: some View {
+        VStack(spacing: 0) {
+            mainRow
+            if expanded {
+                ForEach(session.children) { child in
+                    ChildAgentRow(child: child, onTap: onTap)
+                }
+            }
+        }
+    }
+
+    private var mainRow: some View {
         HStack(spacing: 10) {
             StatusDot(color: DS.status(session.state), diameter: 9, glow: 7)
 
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 7) {
-                    Text(session.project)
+                HStack(spacing: 6) {
+                    Text(projectLabel)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(DS.textPrimary)
                         .lineLimit(1)
-                        .fixedSize()
+                        .truncationMode(.middle)
                     if let b = session.gitBranch, !b.isEmpty {
                         Text(b)
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -573,28 +885,22 @@ private struct SessionPanelRow: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
-                }
-                if session.isCompacting {
-                    // A working chat mid-compaction: name it explicitly here (the tower only shows the
-                    // quiet chip). Amber so it reads as a working sub-state, not an alert.
-                    HStack(spacing: 4) {
-                        Image(systemName: "rectangle.compress.vertical")
-                            .font(.system(size: 9, weight: .semibold))
-                        Text(L("status.compacting"))
-                            .font(.system(size: 11, weight: .medium))
-                            .lineLimit(1)
+                    AgentBadge(agent: session.originAgent)
+                    HostGlyph(host: session.host)
+                    if session.isBackground {
+                        Text(L("row.background"))
+                            .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                            .foregroundStyle(DS.textTertiary)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(DS.neutralBtn, in: Capsule())
                     }
-                    .foregroundStyle(DS.yellow)
-                } else if let t = session.title, !t.isEmpty {
-                    Text(t)
-                        .font(.system(size: 11))
-                        .foregroundStyle(DS.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
                 }
+                secondLine
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityLabel(session.displayName)
+
+            if !session.children.isEmpty { childrenToggle }
 
             VStack(alignment: .trailing, spacing: 1) {
                 if let ctx = session.context {
@@ -603,7 +909,8 @@ private struct SessionPanelRow: View {
                         .foregroundStyle(DS.contextTint(ctx.usedPercent))
                 }
                 if let u = session.tokens {
-                    Text(Fmt.cost(u.costUsd))
+                    // Codex threads carry tokens but no price list → show the token count, not "$0.00".
+                    Text(u.costUsd > 0 ? Fmt.cost(u.costUsd) : Fmt.tokens(u.totalTokens))
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(DS.textTertiary)
                 }
@@ -620,6 +927,70 @@ private struct SessionPanelRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
         .onHover { hovering = $0 }
+    }
+
+    /// The bold lead text. Inside a product group the product name is the section header, so the row shows
+    /// the sub-repo ("aigirl-backend", or the plain folder at the root); in status mode a grouped chat
+    /// reads "product › sub-repo" so sibling repos of one product stay distinguishable.
+    private var projectLabel: String {
+        guard let root = session.productRoot else { return session.project }
+        let rel = ProductGroups.relativeLabel(cwd: session.cwd, root: root)
+        switch settings.grouping {
+        case .product: return rel ?? session.project
+        case .status:
+            // An auto-suggested group must not relabel the default list — only groups the user owns
+            // (manual) or named themselves in the ChatGPT app (Codex project) earn the `product › repo` form.
+            guard !session.productGroupIsAuto else { return session.project }
+            return rel.map { "\((root as NSString).lastPathComponent) › \($0)" } ?? session.project
+        }
+    }
+
+    /// Compacting (amber) › waiting reason (red) › the chat title. One line, the most urgent fact wins.
+    @ViewBuilder
+    private var secondLine: some View {
+        if session.isCompacting {
+            // A working chat mid-compaction: name it explicitly here (the tower only shows the
+            // quiet chip). Amber so it reads as a working sub-state, not an alert.
+            HStack(spacing: 4) {
+                Image(systemName: "rectangle.compress.vertical")
+                    .font(.system(size: 9, weight: .semibold))
+                Text(L("status.compacting"))
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(DS.yellow)
+        } else if session.state == .waiting, let w = session.waitingKind {
+            Text(w == .input ? L("row.waiting.input") : L("row.waiting.permission"))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(DS.redText)
+                .lineLimit(1)
+        } else if let t = session.title, !t.isEmpty {
+            Text(t)
+                .font(.system(size: 11))
+                .foregroundStyle(DS.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+
+    /// "▸ 3" / "▾ 3" — how many sub-agents, and a toggle to reveal them. A `Button` so it wins the click
+    /// over the row's tap gesture.
+    private var childrenToggle: some View {
+        Button { settings.toggleSessionExpanded(session.id) } label: {
+            HStack(spacing: 3) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
+                Text("\(session.children.count)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            }
+            .foregroundStyle(session.children.contains { $0.state == .working } ? DS.yellow : DS.textTertiary)
+            .padding(.horizontal, 5).padding(.vertical, 3)
+            .background(DS.neutralBtn, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(expanded ? L("row.children.hide") : L("row.children.show"))
+        .accessibilityLabel(Lcount("noun.subagents", session.children.count))
     }
 }
 
@@ -741,7 +1112,7 @@ extension SettingsAppRow where Trailing == AnyView {
         self.trailing = AnyView(
             Text(on ? L("state.on") : L("state.off"))
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(on ? DS.green : DS.textTertiary)
+                .foregroundStyle(on ? DS.greenText : DS.textTertiary)
         )
     }
 
@@ -796,6 +1167,60 @@ private struct TrustedRow: View {
                 .padding(.horizontal, 6)
         )
         .onHover { hovering = $0 }
+    }
+}
+
+/// One product-group row: name · root (mono, middle-truncated) · source pill · ✕ (manual only).
+private struct ProductGroupRow: View {
+    let group: ProductGroup
+    let onRemove: (() -> Void)?
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(group.name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(DS.textPrimary)
+                    .lineLimit(1)
+                Text((group.root as NSString).abbreviatingWithTildeInPath)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(DS.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(sourceLabel)
+                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                .foregroundStyle(DS.textTertiary)
+                .padding(.horizontal, 5).padding(.vertical, 1.5)
+                .background(DS.neutralBtn, in: Capsule())
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(hovering ? DS.redText : DS.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help(L("settings.groups.remove"))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(hovering ? DS.hoverRow : .clear)
+                .padding(.horizontal, 6)
+        )
+        .onHover { hovering = $0 }
+    }
+
+    private var sourceLabel: String {
+        switch group.source {
+        case .manual: return L("settings.groups.source.manual")
+        case .codex:  return "Codex"
+        case .auto:   return L("settings.groups.source.auto")
+        }
     }
 }
 

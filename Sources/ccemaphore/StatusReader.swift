@@ -37,6 +37,9 @@ struct StatusEntry: Sendable {
     /// `remoteHostId == nil` while every other status rule (demote / suppressDone / native-wait /
     /// compacting) serves remote sessions for free. Defaulted so the memberwise init is unchanged.
     var remoteHostId: String? = nil
+    /// Which agent's hook wrote the file (`HookHandler.writeStatus` records it; `--agent codex` files are
+    /// also keyed `codex:<thread_id>`). Older files carry no tag → Claude.
+    var agent: AgentKind = .claude
 }
 
 enum StatusReader {
@@ -57,7 +60,7 @@ enum StatusReader {
     /// broker to notice — from its own separate process — that the chat advanced past our `permission`
     /// wait (i.e. the user answered in Cursor's own dialog), so it can drop the request promptly.
     static func readOne(sessionId: String, dir: String = HookHandler.statusDir) -> StatusEntry? {
-        parse(path: (dir as NSString).appendingPathComponent("\(sessionId).json"))
+        parse(path: (dir as NSString).appendingPathComponent(HookHandler.statusFileName(for: sessionId)))
     }
 
     /// Decode one status file into a `StatusEntry`; nil on any missing/garbled field.
@@ -92,11 +95,14 @@ enum StatusReader {
         let hostBundleId = (json["host_app"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let nonBrokerSeq = (json["nb_seq"] as? NSNumber)?.intValue
         let nonBrokerEvent = (json["nb_event"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let agent = (json["agent"] as? String).flatMap(AgentKind.init(rawValue:))
+            ?? (SessionInfo.parseCodexID(id) != nil ? .codex : .claude)
         return StatusEntry(id: id, state: state, project: project, cwd: cwd,
                            updatedAt: updated, lastEvent: lastEvent,
                            isCompacting: isCompacting, ownerPid: ownerPid,
                            host: host, hostBundleId: hostBundleId,
-                           nonBrokerSeq: nonBrokerSeq, nonBrokerEvent: nonBrokerEvent)
+                           nonBrokerSeq: nonBrokerSeq, nonBrokerEvent: nonBrokerEvent,
+                           agent: agent)
     }
 
     private static func parseISO(_ s: String) -> Date? { ISOTime.parse(s) }

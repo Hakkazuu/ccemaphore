@@ -4,16 +4,33 @@ import Darwin
 /// Wraps `ccusage --json` to provide token/cost numbers per session and per day. `ccusage` already
 /// handles deduplication and pricing (§3.4 of the spec), so we never sum tokens ourselves.
 ///
-/// Verified contract (see memory ccusage-json-contract):
-///  - `daily --json`   → { daily: [{ period:"YYYY-MM-DD", totalTokens, totalCost, ... }], totals }
-///  - `session --json` → { session: [{ period:"<uuid>", totalTokens, totalCost, metadata.lastActivity }], totals }
-///  - join key: a live session's id == the session entry's `period` (NOT a field named sessionId).
+/// Verified contract (see memory ccusage-json-contract). ccusage ≥ 20 reports EVERY agent it detects —
+/// Claude Code and Codex — in one unified output:
+///  - `daily --json [--by-agent]` → { daily: [{ period:"YYYY-MM-DD", totalTokens, totalCost,
+///    metadata.agents:["claude","codex"], agents:[{ agent, totalTokens, totalCost }] (--by-agent only) }], totals }
+///  - `session --json` → { session: [{ agent:"claude"|"codex", period, totalTokens, totalCost,
+///    metadata.lastActivity }], totals }. `period` is the Claude session UUID, or for Codex the rollout
+///    path stem (`2026/10/08/rollout-<ts>-<thread_id>`) — NOT a field named sessionId.
+///  - join keys: a live Claude session's id == `period`; a live Codex thread's id ==
+///    `SessionInfo.codexID` of the uuid that ends `period`.
+/// Older ccusage (no `agent` field, no `--by-agent`) degrades to Claude-only numbers without a split.
 actor UsageProvider {
     private(set) var bySession: [String: TokenUsage] = [:]
     private(set) var days: [DayStat] = []
     /// Resolved runner path last logged — so `refresh()` records the picked bunx/npx only when it
     /// changes, not on every 45 s cycle.
     private var lastRunnerPath: String?
+    /// Whether this ccusage accepts `daily --by-agent` (the per-day Claude/Codex split): nil = still
+    /// probing, true = works, false = rejected (an older ccusage exits non-zero on the unknown flag).
+    /// A single failure proves nothing — two bunx runs started in the same instant have been seen to
+    /// both exit 1 (cache-lock race) — so it takes `byAgentStrikesToLock` consecutive failures with a
+    /// working plain report to lock, and a locked flag is re-probed every `byAgentReprobeEvery`
+    /// refreshes (≈ 30 min) so an upgraded ccusage is picked up without a relaunch.
+    private var byAgentSupported: Bool?
+    private var byAgentStrikes = 0
+    private var refreshesSinceByAgentLock = 0
+    private static let byAgentStrikesToLock = 3
+    private static let byAgentReprobeEvery = 40
 
     /// UUID → (mtime, resolved metadata). Lets each 45s refresh skip re-reading transcripts whose
     /// file hasn't changed; only the handful of active sessions are re-read per cycle.
@@ -31,52 +48,109 @@ actor UsageProvider {
         }
         // Plain `ccusage` (not `ccusage@latest`): bunx/npx reuses the cached copy instead of doing a
         // registry round-trip on every 45s refresh — faster, and it works offline once installed.
-        async let dailyData = Self.run(exe, ["ccusage", "daily", "--json"])
+        // `--by-agent` adds the per-day Claude/Codex split; an older ccusage rejects it, so fall back
+        // to the plain report and, after repeated rejections, stop asking for a while (see `byAgentSupported`).
+        var tryByAgent = byAgentSupported != false
+        if !tryByAgent {
+            refreshesSinceByAgentLock += 1
+            if refreshesSinceByAgentLock >= Self.byAgentReprobeEvery {
+                refreshesSinceByAgentLock = 0
+                tryByAgent = true
+            }
+        }
+        let plainDaily = ["ccusage", "daily", "--json"]
+        async let dailyFirst = Self.run(exe, tryByAgent ? plainDaily + ["--by-agent"] : plainDaily)
         async let sessionData = Self.run(exe, ["ccusage", "session", "--json"])
 
-        // 1) Sessions → per-session usage (the live-session join) + the raw chat list.
-        var sessionEntries: [SessionEntry] = []
+        var dailyData = await dailyFirst
+        if tryByAgent {
+            if dailyData != nil {
+                byAgentSupported = true
+                byAgentStrikes = 0
+            } else if await sessionData != nil {
+                // The runner itself works (the session report came back), so the FLAG is what failed —
+                // fall back to the plain report. With both calls dead (no ccusage at all) skip the third
+                // spawn: it would fail the same way, every 45 s.
+                dailyData = await Self.run(exe, plainDaily)
+                // Count a strike only when the plain report worked in the same round — then the flag,
+                // not the runner, is what failed. A flag that has worked before never locks (transient).
+                if dailyData != nil, byAgentSupported != true {
+                    byAgentStrikes += 1
+                    if byAgentStrikes >= Self.byAgentStrikesToLock {
+                        byAgentSupported = false
+                        byAgentStrikes = 0
+                        refreshesSinceByAgentLock = 0
+                        Log.usage.info("ccusage daily --by-agent rejected \(Self.byAgentStrikesToLock)× — per-agent history split off, re-probing later")
+                    }
+                }
+            }
+        }
+
+        // 1) Sessions → per-session usage (the live-session join) + the raw chat list. Each entry is
+        //    keyed the way the live session list keys it: Claude by UUID, Codex by `codex:<thread_id>`.
+        //    Agents ccemaphore doesn't track (ccusage also knows Gemini, OpenCode, …) are left out of the
+        //    chat list — their tokens still count in the day totals.
+        var keyed: [KeyedSession] = []
         if let data = await sessionData {
             if let resp = try? JSONDecoder().decode(SessionResponse.self, from: data) {
-                sessionEntries = resp.session
-                bySession = Dictionary(sessionEntries.map { ($0.period, $0.usage) }, uniquingKeysWith: { a, _ in a })
+                keyed = resp.session.compactMap(KeyedSession.init)
+                bySession = Dictionary(keyed.map { ($0.key, $0.entry.usage) }, uniquingKeysWith: { a, _ in a })
             } else {
                 Log.usage.warn("ccusage session: unparseable output (\(data.count)B)")
             }
         }   // (nil data: run() already logged spawn/timeout/exit reason)
 
-        // 2) Recover project + title per session from its transcript (off-actor, mtime-cached).
-        let ids = sessionEntries.map(\.period)
+        // 2) Recover project + title per chat, off-actor: Claude from its transcript (mtime-cached),
+        //    Codex from the thread catalog (one SQLite query for all ids).
+        let claudeIds = keyed.filter { $0.agent == .claude }.map(\.key)
+        let codexIds = Set(keyed.compactMap(\.codexThreadId))
         let cacheSnapshot = metaCache
-        let resolved = await Task.detached(priority: .utility) {
-            Self.resolveMeta(sessionIds: ids, cache: cacheSnapshot)
-        }.value
+        let claudeTask = Task.detached(priority: .utility) {
+            Self.resolveMeta(sessionIds: claudeIds, cache: cacheSnapshot)
+        }
+        let codexTask = Task.detached(priority: .utility) {
+            Self.codexMeta(threadIds: codexIds)
+        }
+        let resolved = await claudeTask.value
+        let codexMetas = await codexTask.value
         metaCache = resolved.cache
         let metas = resolved.metas
 
         // 3) Group chats by the local day of their last activity.
         var dayChats: [String: [ChatStat]] = [:]
-        for e in sessionEntries {
+        for k in keyed {
+            let e = k.entry
             guard let iso = e.metadata?.lastActivity, let day = Self.localDay(iso) else { continue }
-            let meta = metas[e.period] ?? TranscriptMeta(project: "—", title: nil)
-            // Workflow sub-agent runs (ccusage reports them under a `wf_*` id) carry no title of their own.
-            let title = meta.title ?? (e.period.hasPrefix("wf_") ? L("chat.workflowAgent") : nil)
-            let chat = ChatStat(sessionId: e.period, project: meta.project, title: title,
+            let meta: TranscriptMeta
+            let title: String?
+            switch k.agent {
+            case .claude:
+                meta = metas[k.key] ?? TranscriptMeta(project: "—", title: nil)
+                // Workflow sub-agent runs (ccusage reports them under a `wf_*` id) carry no title of their own.
+                title = meta.title ?? (k.key.hasPrefix("wf_") ? L("chat.workflowAgent") : nil)
+            case .codex:
+                meta = k.codexThreadId.flatMap { codexMetas[$0] } ?? TranscriptMeta(project: "—", title: nil)
+                title = meta.title
+            }
+            let chat = ChatStat(sessionId: k.key, project: meta.project, title: title,
                                 tokens: e.totalTokens ?? 0, cost: e.totalCost ?? 0,
-                                models: e.modelsUsed ?? [], lastActivity: Self.localDate(iso) ?? .distantPast)
+                                models: e.modelsUsed ?? [], lastActivity: Self.localDate(iso) ?? .distantPast,
+                                agent: k.agent)
             dayChats[day, default: []].append(chat)
         }
 
-        // 4) Days from `ccusage daily` (authoritative per-day totals); attach the chat breakdown.
-        //    A day present only via chats (no daily row) is synthesized from its chats so nothing hides.
+        // 4) Days from `ccusage daily` (authoritative per-day totals + the agent split); attach the chat
+        //    breakdown. A day present only via chats (no daily row) is synthesized from its chats so
+        //    nothing hides.
         var byDate: [String: DayStat] = [:]
         var gotDaily = false
-        if let data = await dailyData {
+        if let data = dailyData {
             if let resp = try? JSONDecoder().decode(DailyResponse.self, from: data) {
                 gotDaily = true
                 for e in resp.daily {
                     byDate[e.period] = DayStat(date: e.period, chatCount: 0,
-                                               totalTokens: e.totalTokens ?? 0, costUsd: e.totalCost ?? 0, chats: [])
+                                               totalTokens: e.totalTokens ?? 0, costUsd: e.totalCost ?? 0,
+                                               chats: [], byAgent: e.agentSplit)
                 }
             } else {
                 Log.usage.warn("ccusage daily: unparseable output (\(data.count)B)")
@@ -87,18 +161,39 @@ actor UsageProvider {
             if var d = byDate[day] {
                 d.chats = sorted; d.chatCount = sorted.count; byDate[day] = d
             } else {
-                byDate[day] = DayStat(date: day, chatCount: sorted.count,
-                                      totalTokens: sorted.reduce(0) { $0 + $1.tokens },
-                                      costUsd: sorted.reduce(0) { $0 + $1.cost }, chats: sorted)
+                var d = DayStat(date: day, chatCount: sorted.count,
+                                totalTokens: sorted.reduce(0) { $0 + $1.tokens },
+                                costUsd: sorted.reduce(0) { $0 + $1.cost }, chats: sorted)
+                for c in sorted {
+                    d.byAgent[c.agent, default: TokenShare()] = d.byAgent[c.agent, default: TokenShare()]
+                        + TokenShare(tokens: c.tokens, cost: c.cost)
+                }
+                byDate[day] = d
             }
         }
         days = byDate.values.sorted { $0.date > $1.date }
 
         if gotDaily || !days.isEmpty {
-            Log.usage.info("ccusage refresh ok: sessions=\(bySession.count) days=\(days.count)")
+            Log.usage.info("ccusage refresh ok: sessions=\(bySession.count) (codex \(codexIds.count)) days=\(days.count) split=\(byAgentSupported == true)")
         } else if bySession.isEmpty {
             Log.usage.warn("ccusage produced no parseable output (is ccusage installed for \(exe.lastPathComponent)?)")
         }
+    }
+
+    /// Project + title for Codex threads, from Codex's own thread catalog (`state_5.sqlite`): the AI /
+    /// user-given name, else the auto title, and the thread's cwd. An unreadable catalog (nil rows —
+    /// the ChatGPT app holds the write lock mid-checkpoint) yields no labels this round, like a vanished
+    /// Claude transcript; the next refresh fills them in.
+    private static func codexMeta(threadIds: Set<String>) -> [String: TranscriptMeta] {
+        guard !threadIds.isEmpty, let rows = CodexIndex.threads(ids: threadIds) else { return [:] }
+        var out: [String: TranscriptMeta] = [:]
+        for r in rows {
+            let name = r.name.flatMap { $0.isEmpty ? nil : $0 } ?? (r.title.isEmpty ? nil : r.title)
+            let title = name.map { $0.count > 80 ? String($0.prefix(80)) + "…" : $0 }
+            let project = r.cwd.isEmpty ? "—" : (r.cwd as NSString).lastPathComponent
+            out[r.id.lowercased()] = TranscriptMeta(project: project, title: title)
+        }
+        return out
     }
 
     /// Resolve project/title for each session id, reusing cache entries whose file mtime is unchanged.
@@ -225,11 +320,43 @@ private struct DailyEntry: Decodable {
     let period: String
     let totalTokens: Int?
     let totalCost: Double?
+    let metadata: Meta?
+    /// Per-agent rows — present only with `--by-agent` (ccusage ≥ 20).
+    let agents: [AgentRow]?
+
+    struct Meta: Decodable { let agents: [String]? }
+    struct AgentRow: Decodable {
+        let agent: String
+        let totalTokens: Int?
+        let totalCost: Double?
+    }
+
+    /// The day's Claude / Codex split. Explicit with `--by-agent`. Without it, a day ccusage attributes
+    /// to exactly one agent we know (or an older ccusage that lists none — Claude-only) is wholly that
+    /// agent's; a mixed day stays unsplit (combined totals only, no per-agent bars).
+    var agentSplit: [AgentKind: TokenShare] {
+        if let agents {
+            var out: [AgentKind: TokenShare] = [:]
+            for row in agents {
+                guard let kind = AgentKind(ccusage: row.agent) else { continue }
+                out[kind, default: TokenShare()] = out[kind, default: TokenShare()]
+                    + TokenShare(tokens: row.totalTokens ?? 0, cost: row.totalCost ?? 0)
+            }
+            return out
+        }
+        let listed = metadata?.agents ?? ["claude"]
+        guard listed.count == 1, let only = listed.first, let kind = AgentKind(ccusage: only) else { return [:] }
+        return [kind: TokenShare(tokens: totalTokens ?? 0, cost: totalCost ?? 0)]
+    }
 }
 
 private struct SessionResponse: Decodable { let session: [SessionEntry] }
 private struct SessionEntry: Decodable {
-    let period: String      // session UUID — the join key
+    /// Claude: the session UUID. Codex: the rollout path stem (`YYYY/MM/DD/rollout-<ts>-<thread_id>`,
+    /// or just `rollout-…` for a file at the sessions root). The join key is derived in `KeyedSession`.
+    let period: String
+    /// `"claude"` / `"codex"` / another agent ccusage knows; absent in older ccusage (Claude only).
+    let agent: String?
     let inputTokens: Int?
     let outputTokens: Int?
     let cacheCreationTokens: Int?
@@ -245,6 +372,44 @@ private struct SessionEntry: Decodable {
         TokenUsage(inputTokens: inputTokens ?? 0, outputTokens: outputTokens ?? 0,
                    cacheCreationTokens: cacheCreationTokens ?? 0, cacheReadTokens: cacheReadTokens ?? 0,
                    totalTokens: totalTokens ?? 0, costUsd: totalCost ?? 0)
+    }
+}
+
+/// A ccusage session entry resolved to the agent ccemaphore tracks and the id the live session list
+/// uses for it — so `bySession` joins and `ChatStat` rows are keyed identically to `SessionInfo.id`.
+/// nil for agents we don't track, and for a Codex entry whose `period` carries no thread uuid.
+private struct KeyedSession {
+    let entry: SessionEntry
+    let agent: AgentKind
+    let key: String
+    let codexThreadId: String?
+
+    init?(_ entry: SessionEntry) {
+        guard let agent = AgentKind(ccusage: entry.agent ?? "claude") else { return nil }
+        self.entry = entry
+        self.agent = agent
+        switch agent {
+        case .claude:
+            key = entry.period
+            codexThreadId = nil
+        case .codex:
+            let name = (entry.period as NSString).lastPathComponent
+            guard let tid = CodexPaths.threadId(fromRolloutName: name.hasSuffix(".jsonl") ? name : name + ".jsonl")
+            else { return nil }
+            key = SessionInfo.codexID(threadId: tid)
+            codexThreadId = tid
+        }
+    }
+}
+
+private extension AgentKind {
+    /// ccusage's agent name → the agents ccemaphore tracks. nil for the rest (Gemini, OpenCode, …).
+    init?(ccusage name: String) {
+        switch name {
+        case "claude": self = .claude
+        case "codex": self = .codex
+        default: return nil
+        }
     }
 }
 

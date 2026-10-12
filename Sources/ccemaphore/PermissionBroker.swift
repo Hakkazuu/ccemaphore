@@ -35,10 +35,31 @@ enum PermissionBroker {
     static var watchMarker: String { (baseDir as NSString).appendingPathComponent("watch-ide-log") }
     static func isWatchIDELogEnabled() -> Bool { FileManager.default.fileExists(atPath: watchMarker) }
 
+    /// UserDefaults key of `WidgetSettings.desktopPermissionWait`. The blocking hook is a separate process
+    /// of the SAME binary/bundle id, so it can read the GUI's defaults domain directly (the localization
+    /// layer already relies on this) — no marker file needed for this one.
+    static let desktopWaitDefaultsKey = "permission.desktopWait"
+    static func isDesktopWaitEnabled() -> Bool { UserDefaults.standard.bool(forKey: desktopWaitDefaultsKey) }
+
+    /// May the broker BLOCK (show a live Allow/Deny ribbon) for a chat on this host? Only where the host
+    /// shows its own prompt ALONGSIDE ours, so a long wait can never freeze the agent:
+    ///  - `.ide` (Cursor / VS Code extension): verified — yes;
+    ///  - `.desktop` (Claude app): same card-alongside model, but gated by the setting until verified live;
+    ///  - `.codexApp`: Codex runs hooks BEFORE its own prompt, so blocking would HIDE that prompt — never;
+    ///  - `.terminal` / `.unknown`: the prompt is inline / unclassified — never (fail safe).
+    static func mayBlock(on host: SessionHost) -> Bool {
+        switch host {
+        case .ide:      return true
+        case .desktop:  return isDesktopWaitEnabled()
+        case .codexApp, .terminal, .unknown: return false
+        }
+    }
+
     /// Upper bound on how long the hook blocks waiting for the user — used here only to GC orphaned
-    /// requests. The per-call wait is chosen by GUI readiness (90s with notifications, 30s popover-only,
-    /// 0s when the app is closed); this MAX value bounds `listPending`/`sweep` and must stay < the
-    /// hook's settings.json timeout (300).
+    /// requests. The per-call wait is chosen by GUI readiness (`AppPresence.waitWindow`): the full
+    /// `Tuning.permissionPollTimeout` (240 s) while the app runs with the widget visible, 0 s when the widget
+    /// is hidden or the app is closed (or still starting up). This MAX value bounds `listPending`/`sweep`
+    /// and must stay < the hook's settings.json timeout (300).
     static var pollTimeout: TimeInterval { Tuning.permissionPollTimeout }
 
     enum Decision: String {
@@ -116,36 +137,43 @@ enum PermissionBroker {
     static let brokerStatusEvents: Set<String> =
         ["permission", "permission-native", "permission-resolved", "permission-app-quit", "question-native"]
 
-    static func runHook(event: HookEvent) {
+    /// `agent`: whose `PermissionRequest` this is. Codex's hook contract is the same JSON in and the same
+    /// `hookSpecificOutput.decision.behavior` out, so the flow is shared; only the id namespace, the host
+    /// classification and the wait policy (`mayBlock`) differ.
+    static func runHook(event: HookEvent, agent: AgentKind = .claude) {
         let data = FileHandle.standardInput.readDataToEndOfFile()
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        // Resolve whose payload this is BEFORE snapshotting, so an imported un-tagged hook that Codex runs
+        // lands in the Codex capture instead of clobbering the last real Claude one.
+        let agent = HookHandler.resolvedAgent(declared: agent, payload: json)
         // Snapshot the raw payload (overwrite per event) so the first real prompt on any host — Cursor
         // included — lets `--perm-diag` confirm the event fires AND reveal its exact field shape.
-        writeDiag(event: event, raw: data)
-        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        guard let sid = json["session_id"] as? String, !sid.isEmpty else {
+        writeDiag(event: event, raw: data, agent: agent)
+        guard let rawSid = json["session_id"] as? String, !rawSid.isEmpty else {
             // Mirror HookHandler's guard log: a dropped permission prompt must be visible in the log,
             // not only recoverable via a manual `--perm-diag` snapshot.
-            Log.permissions.warn("request event=\(event.wire) ignored: missing/empty session_id (\(data.count)B stdin)")
+            Log.permissions.warn("request event=\(event.wire) agent=\(agent.rawValue) ignored: missing/empty session_id (\(data.count)B stdin)")
             return
         }
+        let sid = agent == .codex ? SessionInfo.codexID(threadId: rawSid.lowercased()) : rawSid
         let tool = json["tool_name"] as? String ?? L("permission.tool.fallback")
         let cwd = json["cwd"] as? String ?? ""
 
-        Log.permissions.info("request event=\(event.wire) sid=\(sid.prefix(8)) tool=\(tool)")
+        Log.permissions.info("request event=\(event.wire) sid=\(sidTag(sid)) tool=\(tool)")
 
         // Question tools (AskUserQuestion): NOT a permission — nothing to allow/deny, the user must
         // answer in the chat. Don't block and don't create a decision request; mark the chat red with a
         // distinct `question-native` event (so the widget shows an "input needed → open chat" ribbon
         // that persists until answered) and release the hook so the question appears in Cursor at once.
         if questionTools.contains(tool) {
-            HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "question-native")
-            Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → ask (question tool, kept red)")
+            HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "question-native", agent: agent)
+            Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → ask (question tool, kept red)")
             emit(.ask, event: event); return
         }
 
         // Remembered "allow all for this chat" → allow instantly, no notification.
         if isAllowAll(sid) {
-            Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → allow (remembered allow-all)")
+            Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → allow (remembered allow-all)")
             emit(.allowOnce, event: event); return
         }
 
@@ -155,7 +183,7 @@ enum PermissionBroker {
         // prompting" case. Claude still enforces any deny/ask rule regardless of our hook, so this can
         // never bypass a user deny. Applies to both events (allow is what we want; not a defer).
         if TrustedCommands.isTrusted(tool: tool, input: json["tool_input"]) {
-            Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → allow (trusted command)")
+            Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → allow (trusted command)")
             emit(.allowOnce, event: event); return
         }
 
@@ -171,7 +199,7 @@ enum PermissionBroker {
         if case .preToolUse = event {
             let mode = PermissionRules.resolveMode(payload: json, cwd: cwd)
             if PermissionRules.claudeWillNotPrompt(tool: tool, input: json["tool_input"], permissionMode: mode, cwd: cwd) {
-                Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → defer (Claude auto-resolves, mode=\(mode ?? "default"))")
+                Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → defer (Claude auto-resolves, mode=\(mode ?? "default"))")
                 return
             }
         }
@@ -181,7 +209,7 @@ enum PermissionBroker {
         // hand the request straight to Claude's own prompt instead of stalling, leaving nothing behind.
         let readiness = AppPresence.readiness()
         if case .notRunning = readiness {
-            Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → ask (GUI not running)")
+            Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → ask (GUI not running)")
             emit(.ask, event: event); return
         }
         // Where this chat runs decides whether we may block at all. In an IDE (Cursor / VS Code) the
@@ -191,10 +219,10 @@ enum PermissionBroker {
         // front of the user — blocking risks a frozen agent with no on-widget benefit — so we give it no
         // wait window and hand straight to that prompt. `.unknown` is treated like a terminal here (fail
         // safe: never freeze an unclassified host), while focus still falls back to the Cursor path.
-        let host = ProcTree.sessionContext().host
-        // The wait window is a real one only for an IDE host AND a VISIBLE widget (the ribbon is then on
-        // screen with live buttons); terminal/unknown host, or a hidden widget → 0, hand off at once.
-        let waitWindow = (host == .ide) ? AppPresence.waitWindow(readiness) : 0
+        let host = ProcTree.sessionContext(agent: agent).host
+        // The wait window is a real one only for a host that may block (see `mayBlock`) AND a VISIBLE
+        // widget (the ribbon is then on screen with live buttons); otherwise 0, hand off at once.
+        let waitWindow = mayBlock(on: host) ? AppPresence.waitWindow(readiness) : 0
 
         // No wait window → don't flash a decision ribbon whose buttons can't be answered (the broker
         // won't be here to read them). Keep the chat red with the informational `permission-native`
@@ -202,12 +230,12 @@ enum PermissionBroker {
         // the hidden-widget IDE path; both used to write-then-immediately-GC a pending, briefly flashing
         // an un-actionable decision ribbon (now visible on a terminal with the widget up) — skip it.
         if waitWindow <= 0 {
-            HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "permission-native")
-            Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → ask (no wait, host=\(host.rawValue), kept red)")
+            HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "permission-native", agent: agent)
+            Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → ask (no wait, host=\(host.rawValue), kept red)")
             emit(.ask, event: event)
             return
         }
-        Log.permissions.debug("prompting sid=\(sid.prefix(8)) tool=\(tool) host=\(host.rawValue) wait=\(Int(waitWindow))s")
+        Log.permissions.debug("prompting sid=\(sidTag(sid)) tool=\(tool) host=\(host.rawValue) wait=\(Int(waitWindow))s")
 
         let reqId = "\(sid)__\(UUID().uuidString)"   // unique regardless of timing
         // Only pay the transcript-tail toolUseId reconstruction when the IDE-log watch is enabled
@@ -217,7 +245,7 @@ enum PermissionBroker {
         let watchIDELog = isWatchIDELogEnabled()
         let toolUseId = watchIDELog ? reconstructToolUseId(payload: json, tool: tool) : nil
         if watchIDELog, toolUseId == nil {
-            Log.permissions.debug("no toolUseId reconstructed sid=\(sid.prefix(8)) tool=\(tool) "
+            Log.permissions.debug("no toolUseId reconstructed sid=\(sidTag(sid)) tool=\(tool) "
                 + "— early IDE-log resolution unavailable for this request")
         }
         let req = PendingRequest(requestId: reqId, sessionId: sid, tool: tool,
@@ -238,7 +266,7 @@ enum PermissionBroker {
         // This synchronous atomic write has landed before the loop starts, so the first status read
         // below sees OUR `permission` event — any later NON-broker event then means a subsequent hook
         // fired (the user resolved in Cursor's own dialog).
-        HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "permission")
+        HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "permission", agent: agent)
 
         let decisionFile = (pendingDir as NSString).appendingPathComponent("\(reqId).decision")
         let deadline = Date().addingTimeInterval(waitWindow)
@@ -248,7 +276,7 @@ enum PermissionBroker {
                 let dec = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 cleanup(reqId)
                 HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "working", event: "permission-resolved")
-                Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → \(dec)")
+                Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → \(dec)")
                 switch dec {
                 case Decision.allowOnce.rawValue: emit(.allowOnce, event: event)
                 case Decision.allowAll.rawValue: setAllowAll(sid); emit(.allowOnce, event: event)
@@ -274,7 +302,7 @@ enum PermissionBroker {
             if let st = StatusReader.readOne(sessionId: sid) {
                 if let ev = st.lastEvent, !brokerStatusEvents.contains(ev) {
                     cleanup(reqId)
-                    Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → resolved externally (event=\(ev))")
+                    Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → resolved externally (event=\(ev))")
                     emit(.ask, event: event)
                     return
                 }
@@ -285,7 +313,7 @@ enum PermissionBroker {
                 // block; that deprecated path keeps the `last_event` check alone.
                 if case .permissionRequest = event, let seq = st.nonBrokerSeq, seq > externalBaseline {
                     cleanup(reqId)
-                    Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → resolved externally "
+                    Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → resolved externally "
                         + "(event=\(st.nonBrokerEvent ?? "?"), masked)")
                     emit(.ask, event: event)
                     return
@@ -299,7 +327,7 @@ enum PermissionBroker {
                 if case .notRunning = AppPresence.readiness() {
                     cleanup(reqId)
                     HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "working", event: "permission-app-quit")
-                    Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → ask (GUI quit mid-wait)")
+                    Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → ask (GUI quit mid-wait)")
                     emit(.ask, event: event)
                     return
                 }
@@ -314,8 +342,8 @@ enum PermissionBroker {
         // SIGKILLed hook) to `working`; `permission-native` is a real, intentional wait that must stay
         // red until the next hook event (the resumed tool's `pre`, or the turn's `stop`) clears it.
         cleanup(reqId)
-        HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "permission-native")
-        Log.permissions.info("decision sid=\(sid.prefix(8)) tool=\(tool) → ask (handoff after \(Int(waitWindow))s, kept red)")
+        HookHandler.writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "permission-native", agent: agent)
+        Log.permissions.info("decision sid=\(sidTag(sid)) tool=\(tool) → ask (handoff after \(Int(waitWindow))s, kept red)")
         emit(.ask, event: event)
     }
 
@@ -330,9 +358,9 @@ enum PermissionBroker {
         do {
             try FileManager.default.createDirectory(atPath: pendingDir, withIntermediateDirectories: true)
             try decision.rawValue.write(toFile: file, atomically: true, encoding: .utf8)
-            Log.permissions.info("user chose \(decision.rawValue) for sid=\(sid.prefix(8)) (GUI)")
+            Log.permissions.info("user chose \(decision.rawValue) for sid=\(sidTag(sid)) (GUI)")
         } catch {
-            Log.permissions.error("failed to persist decision \(decision.rawValue) for sid=\(sid.prefix(8)): \(error.localizedDescription)")
+            Log.permissions.error("failed to persist decision \(decision.rawValue) for sid=\(sidTag(sid)): \(error.localizedDescription)")
         }
     }
 
@@ -347,9 +375,9 @@ enum PermissionBroker {
         do {
             try FileManager.default.createDirectory(atPath: pendingDir, withIntermediateDirectories: true)
             try Decision.ask.rawValue.write(toFile: file, atomically: true, encoding: .utf8)
-            Log.permissions.info("resolved via IDE log for sid=\(sid.prefix(8)) (answered in IDE dialog)")
+            Log.permissions.info("resolved via IDE log for sid=\(sidTag(sid)) (answered in IDE dialog)")
         } catch {
-            Log.permissions.error("failed to persist IDE-log resolution for sid=\(sid.prefix(8)): \(error.localizedDescription)")
+            Log.permissions.error("failed to persist IDE-log resolution for sid=\(sidTag(sid)): \(error.localizedDescription)")
         }
     }
 
@@ -389,7 +417,7 @@ enum PermissionBroker {
             // hook reads the decision by exact path, so skipping it here is invisible to it; the orphan
             // GC above still reclaims an abandoned decided request once it ages out.
             if fm.fileExists(atPath: (pendingDir as NSString).appendingPathComponent("\(req.requestId).decision")) {
-                Log.permissions.debug("listPending skip decided sid=\(req.sessionId.prefix(8)) req=\(req.requestId.prefix(12))")
+                Log.permissions.debug("listPending skip decided sid=\(sidTag(req.sessionId)) req=\(req.requestId.prefix(12))")
                 continue
             }
             out.append(req)
@@ -488,7 +516,7 @@ enum PermissionBroker {
             let data = try JSONEncoder().encode(req)
             try data.write(to: URL(fileURLWithPath: file), options: [.atomic])
         } catch {
-            Log.permissions.warn("pending write failed sid=\(req.sessionId.prefix(8)) req=\(req.requestId.prefix(12)): \(error.localizedDescription)")
+            Log.permissions.warn("pending write failed sid=\(sidTag(req.sessionId)) req=\(req.requestId.prefix(12)): \(error.localizedDescription)")
         }
     }
 
@@ -499,7 +527,8 @@ enum PermissionBroker {
     }
 
     private static func allowAllMarker(_ sid: String) -> String {
-        (allowAllDir as NSString).appendingPathComponent(sid)
+        // Namespaced ids (`codex:<id>`) use `-` on disk, same rule as the status files.
+        (allowAllDir as NSString).appendingPathComponent(sid.replacingOccurrences(of: ":", with: "-"))
     }
     private static func isAllowAll(_ sid: String) -> Bool {
         FileManager.default.fileExists(atPath: allowAllMarker(sid))
@@ -568,9 +597,10 @@ enum PermissionBroker {
 
     /// Overwrite the raw stdin snapshot for this event (see `diagDir`). Tiny + bounded (one file per
     /// event). Best-effort: a diagnostic must never affect the decision path.
-    private static func writeDiag(event: HookEvent, raw: Data) {
+    private static func writeDiag(event: HookEvent, raw: Data, agent: AgentKind) {
         try? FileManager.default.createDirectory(atPath: diagDir, withIntermediateDirectories: true)
-        let file = (diagDir as NSString).appendingPathComponent("permission-\(event.wire).json")
+        let suffix = agent == .claude ? "" : "-\(agent.rawValue)"
+        let file = (diagDir as NSString).appendingPathComponent("permission-\(event.wire)\(suffix).json")
         try? raw.write(to: URL(fileURLWithPath: file), options: [.atomic])
     }
 }

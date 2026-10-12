@@ -16,22 +16,51 @@ import Darwin
 enum HookHandler {
     static let statusDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/status")
 
-    static func run(_ event: String) {
+    /// The agent a payload belongs to. The installed command's `--agent` tag is authoritative; absent it,
+    /// a `transcript_path` under Codex's home is the one safe inference — it catches the imported,
+    /// un-tagged copies of our Claude hooks that ChatGPT.app writes into hooks.json, which would otherwise
+    /// register a Codex thread as a Claude session (wrong badge, wrong deep link).
+    static func resolvedAgent(declared: AgentKind, payload: [String: Any]) -> AgentKind {
+        if declared == .codex { return .codex }
+        if let tp = payload["transcript_path"] as? String,
+           tp.hasPrefix(CodexPaths.sessionsRoot + "/") || tp.contains("/.codex/sessions/") { return .codex }
+        return declared
+    }
+
+    /// Status files are keyed by session id; a Codex id is namespaced `codex:<thread_id>` and the `:`
+    /// is swapped for `-` on disk (legal on APFS, but Finder renders it as `/` and shells trip on it).
+    static func statusFileName(for sessionId: String) -> String {
+        sessionId.replacingOccurrences(of: ":", with: "-") + ".json"
+    }
+
+    /// Inverse of `statusFileName` for the sweep (filename → id). Only the Codex namespace uses `:`.
+    static func sessionId(fromStatusFileName name: String) -> String {
+        let stem = String(name.dropLast(".json".count))
+        return stem.hasPrefix("codex-") ? "codex:" + stem.dropFirst("codex-".count) : stem
+    }
+
+    /// `agent` says whose hook payload this is (`--agent codex` is appended to every Codex hook command
+    /// by `CodexHooksInstaller`; Claude's carry nothing). Codex and Claude payloads share the field names
+    /// we read (`session_id`, `cwd`, `hook_event_name`), so one handler serves both — the id is just
+    /// namespaced so the two can never collide in the GUI's merge.
+    static func run(_ event: String, agent: AgentKind = .claude) {
         let data = FileHandle.standardInput.readDataToEndOfFile()
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        guard let sid = json["session_id"] as? String, !sid.isEmpty else {
-            Log.hooks.warn("hook=\(event) ignored: missing/empty session_id (\(data.count)B stdin)")
+        guard let rawSid = json["session_id"] as? String, !rawSid.isEmpty else {
+            Log.hooks.warn("hook=\(event) agent=\(agent.rawValue) ignored: missing/empty session_id (\(data.count)B stdin)")
             return
         }
+        let agent = resolvedAgent(declared: agent, payload: json)
+        let sid = agent == .codex ? SessionInfo.codexID(threadId: rawSid.lowercased()) : rawSid
         // `pre`/`post` fire for EVERY tool (hundreds/day) — they're heartbeats, so log them at debug to
         // keep the info stream scannable for state-meaningful events (start/stop/precompact/prompt/notify).
         // Debug is still persisted to the log file, just filtered out of an info-level scan.
         let isHeartbeat = (event == "pre" || event == "post")
         let project = (json["cwd"] as? String ?? "").split(separator: "/").last.map(String.init) ?? "?"
         if isHeartbeat {
-            Log.hooks.debug("hook=\(event) sid=\(sid.prefix(8)) project=\(project)")
+            Log.hooks.debug("hook=\(event) agent=\(agent.rawValue) sid=\(sidTag(sid)) project=\(project)")
         } else {
-            Log.hooks.info("hook=\(event) sid=\(sid.prefix(8)) project=\(project)")
+            Log.hooks.info("hook=\(event) agent=\(agent.rawValue) sid=\(sidTag(sid)) project=\(project)")
         }
 
         try? FileManager.default.createDirectory(atPath: statusDir, withIntermediateDirectories: true)
@@ -45,9 +74,9 @@ enum HookHandler {
             // simply settles at `done` and ages out like any other finished chat. The old unconditional
             // delete inverted this: a killed window (file left behind, pid dead) reaped instantly, but a
             // clean exit (file removed) hung. See memory/terminal-mode-review.md.
-            writeStatus(sessionId: sid, cwd: cwd, state: "done", event: "end")
+            writeStatus(sessionId: sid, cwd: cwd, state: "done", event: "end", agent: agent)
             PermissionBroker.clearAllowAll(sid)   // don't leave an auto-allow marker for a dead session
-            Log.hooks.info("hook=end sid=\(sid.prefix(8)) → done tombstone (pid-reap on exit)")
+            Log.hooks.info("hook=end sid=\(sidTag(sid)) → done tombstone (pid-reap on exit)")
             return
         }
 
@@ -74,10 +103,10 @@ enum HookHandler {
                 // neither, so it silently overwrote the broker's `permission-native` and dropped that
                 // ribbon — the terminal user's only which-chat/click-to-jump surface. See
                 // memory/terminal-mode-review.md.
-                writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "permission-native")
-                Log.hooks.info("hook=notify sid=\(sid.prefix(8)) type=\(type ?? "?") → waiting (permission-native)")
+                writeStatus(sessionId: sid, cwd: cwd, state: "waiting", event: "permission-native", agent: agent)
+                Log.hooks.info("hook=notify sid=\(sidTag(sid)) type=\(type ?? "?") → waiting (permission-native)")
             } else {
-                Log.hooks.debug("hook=notify sid=\(sid.prefix(8)) ignored (idle/auth, type=\(type ?? "?")): \(msg.prefix(40))")
+                Log.hooks.debug("hook=notify sid=\(sidTag(sid)) ignored (idle/auth, type=\(type ?? "?")): \(msg.prefix(40))")
             }
             return   // idle / auth / unknown notifications: leave the existing state untouched
         }
@@ -85,27 +114,29 @@ enum HookHandler {
         let state: String
         switch event {
         case "stop", "start": state = "done"   // stop = finished; start = registered, idle until first prompt
+        case "interrupt":      state = "done"   // Codex `Interrupt`: the user stopped the turn (Esc) — nothing pending
         case "precompact":     state = "compacting"   // context compaction started — a `working` sub-state
-        default:               state = "working"   // prompt / pre / post heartbeat
+        default:               state = "working"   // prompt / pre / post / postcompact heartbeat
         }
         // `post` (PostToolUse) is the load-bearing addition: after the user approves a tool in Cursor's
         // OWN dialog, the tool runs and this fires on completion — a NON-broker event the permission
         // broker's poll loop reads as "resolved externally", dropping the ribbon within ~200 ms instead
         // of hanging until the next unrelated hook. See docs/permission-and-waiting-fixes-plan.md (bug #2).
-        writeStatus(sessionId: sid, cwd: cwd, state: state, event: event)
+        writeStatus(sessionId: sid, cwd: cwd, state: state, event: event, agent: agent)
         if isHeartbeat {
-            Log.hooks.debug("hook=\(event) sid=\(sid.prefix(8)) → \(state)")
+            Log.hooks.debug("hook=\(event) sid=\(sidTag(sid)) → \(state)")
         } else {
-            Log.hooks.info("hook=\(event) sid=\(sid.prefix(8)) → \(state)")
+            Log.hooks.info("hook=\(event) sid=\(sidTag(sid)) → \(state)")
         }
     }
 
     /// Write one status file. Shared by the event hooks and the permission broker.
-    static func writeStatus(sessionId: String, cwd: String, state: String, event: String) {
+    static func writeStatus(sessionId: String, cwd: String, state: String, event: String, agent: AgentKind = .claude) {
         try? FileManager.default.createDirectory(atPath: statusDir, withIntermediateDirectories: true)
-        let file = (statusDir as NSString).appendingPathComponent("\(sessionId).json")
+        let file = (statusDir as NSString).appendingPathComponent(statusFileName(for: sessionId))
         var out: [String: Any] = [
             "session_id": sessionId,
+            "agent": agent.rawValue,
             "cwd": cwd,
             "project": (cwd as NSString).lastPathComponent,
             "state": state,
@@ -117,10 +148,11 @@ enum HookHandler {
         // terminal — drives the permission wait window + where "перейти в чат" jumps). Best-effort: a
         // nil owner pid is omitted; host defaults to `.unknown`. Walked OUTSIDE the lock below — it can
         // take a few ms and needs nothing from the file.
-        let ctx = ProcTree.sessionContext()
+        let ctx = ProcTree.sessionContext(agent: agent)
         if let pid = ctx.ownerPid { out["pid"] = Int(pid) }
         out["host"] = ctx.host.rawValue
         if let bundleId = ctx.hostBundleId { out["host_app"] = bundleId }
+        if let entry = ctx.entrypoint { out["entrypoint"] = entry }
         // The read-carry-write of the non-broker counter must be serialized across the concurrent hook /
         // broker processes that all write this session's one file — two unserialized writers could both
         // read the same `nb_seq` and one increment would vanish, reopening (at µs scale) exactly the
@@ -141,13 +173,13 @@ enum HookHandler {
             // all precise done/waiting state from these files. A swallowed failure here used to leave the
             // log claiming "→ \(state)" with no file behind it, so log both failure points instead.
             guard let d = try? JSONSerialization.data(withJSONObject: out, options: [.sortedKeys]) else {
-                Log.hooks.warn("status write FAILED (encode) sid=\(sessionId.prefix(8)) state=\(state) event=\(event)")
+                Log.hooks.warn("status write FAILED (encode) sid=\(sidTag(sessionId)) state=\(state) event=\(event)")
                 return
             }
             do {
                 try d.write(to: URL(fileURLWithPath: file), options: [.atomic])
             } catch {
-                Log.hooks.warn("status write FAILED sid=\(sessionId.prefix(8)) state=\(state) file=\(file): \(error.localizedDescription)")
+                Log.hooks.warn("status write FAILED sid=\(sidTag(sessionId)) state=\(state) file=\(file): \(error.localizedDescription)")
             }
         }
     }
@@ -160,7 +192,7 @@ enum HookHandler {
     /// seq to a fallback-0 baseline and falsely insta-resolve. One reader ⇒ the two sides can never
     /// disagree about the same bytes.
     static func nonBrokerCarry(sessionId: String) -> (seq: Int, event: String?) {
-        let file = (statusDir as NSString).appendingPathComponent("\(sessionId).json")
+        let file = (statusDir as NSString).appendingPathComponent(statusFileName(for: sessionId))
         guard let data = FileManager.default.contents(atPath: file),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return (0, nil) }
         return ((json["nb_seq"] as? NSNumber)?.intValue ?? 0, json["nb_event"] as? String)
@@ -200,7 +232,7 @@ enum HookHandler {
         let entries = StatusReader.readAll(dir: statusDir)
         for name in names where name.hasSuffix(".json") {
             let path = (statusDir as NSString).appendingPathComponent(name)
-            let id = String(name.dropLast(".json".count))
+            let id = sessionId(fromStatusFileName: name)
             let age: TimeInterval
             if let e = entries[id] {
                 age = now.timeIntervalSince(e.updatedAt)

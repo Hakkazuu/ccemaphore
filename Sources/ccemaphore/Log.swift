@@ -23,10 +23,21 @@ import UniformTypeIdentifiers
 ///
 /// **Privacy:** only metadata is logged (session-id prefix, event, state, paths) — never chat content
 /// — consistent with the app's read-only, never-transmit stance. Files stay on disk, nothing leaves.
+/// Short, log-friendly session id: 8 hex chars for a Claude uuid, `codex:` + 8 for a namespaced Codex id
+/// (a bare `prefix(8)` of `codex:<uuid>` is the constant "codex:01" — useless for per-session diagnosis).
+func sidTag(_ sid: String) -> String {
+    if let t = SessionInfo.parseCodexID(sid) { return "codex:" + t.prefix(8) }
+    return String(sid.prefix(8))
+}
+
 enum Log {
     /// Subsystems we care about — these double as the `os.Logger` category and the `[tag]` in the file.
     enum Category: String, Sendable, CaseIterable {
         case app, hooks, permissions, settings, notifications, watcher, usage, focus
+        /// Claude Code's own live session registry (`~/.claude/sessions/<pid>.json`).
+        case registry
+        /// Everything Codex-side: rollout tailing, the SQLite thread index, writer locks, Codex hooks.
+        case codex
     }
 
     enum Level: String, Sendable {
@@ -51,6 +62,8 @@ enum Log {
     static let watcher       = Channel(.watcher)
     static let usage         = Channel(.usage)
     static let focus         = Channel(.focus)
+    static let registry      = Channel(.registry)
+    static let codex         = Channel(.codex)
 
     /// A category-bound facade. Messages are `@autoclosure` so a suppressed level (e.g. `debug` in a
     /// Release build) never even builds its string.

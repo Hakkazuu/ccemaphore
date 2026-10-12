@@ -98,8 +98,15 @@ enum Fmt {
 
     static func clock(_ date: Date) -> String { clockFmt.string(from: date) }
 
-    /// "claude-opus-4-8" → "Opus 4.8"; "claude-haiku-4-5-20251001" → "Haiku 4.5" (drops the date build).
+    /// "claude-opus-4-8" → "Opus 4.8"; "claude-haiku-4-5-20251001" → "Haiku 4.5" (drops the date build);
+    /// Codex models keep their family: "gpt-5.6-sol" → "GPT-5.6 Sol", "gpt-5.1-codex-max" → "GPT-5.1 Codex Max".
     static func model(_ id: String) -> String {
+        if id.hasPrefix("gpt-") {
+            let parts = id.dropFirst("gpt-".count).split(separator: "-").map(String.init)
+            guard let version = parts.first else { return id.uppercased() }
+            let rest = parts.dropFirst().map(\.capitalized).joined(separator: " ")
+            return rest.isEmpty ? "GPT-\(version)" : "GPT-\(version) \(rest)"
+        }
         var s = id.hasPrefix("claude-") ? String(id.dropFirst("claude-".count)) : id
         s = s.replacingOccurrences(of: "-[0-9]{8}$", with: "", options: .regularExpression)  // drop date suffix
         let parts = s.split(separator: "-", maxSplits: 1).map(String.init)

@@ -24,10 +24,17 @@ struct RibbonItem: Identifiable, Equatable {
     /// The chat's title (aiTitle/lastPrompt from the transcript) — shown as a one-line subtitle under
     /// the project so the user can tell WHICH chat in that project is asking. nil/empty → line hidden.
     var chatTitle: String? = nil
+    /// Whose chat this is (Claude / Codex) — the same badge the panel rows carry, so a Codex approval is
+    /// never mistaken for a Claude one at the light. A thread imported from Claude keeps its origin.
+    var agent: AgentKind = .claude
     /// Where the chat runs, so "перейти в чат" raises the right app (Cursor tab vs. terminal). Defaults
-    /// keep older call sites compiling; the builders fill them from `StateEngine.hostInfo`.
+    /// keep older call sites compiling; the builders fill them from `StateEngine.hostInfo`. Also drawn
+    /// as the host glyph next to the agent badge.
     var host: SessionHost = .unknown
     var hostBundleId: String? = nil
+    /// The host app's own session handle (Claude desktop `local_<uuid>`), for its deep link. See
+    /// `SessionInfo.hostSessionId`.
+    var hostSessionId: String? = nil
     /// Non-nil ⇒ this item is for a session on a remote host (its `RemoteHost.label`) — shown as a small
     /// pill next to the project name so the user can tell a remote request apart from a local one.
     var remoteHostLabel: String? = nil
@@ -179,7 +186,7 @@ struct PermissionRibbonView: View {
             Text(headerTitle(r))
                 .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                 .tracking(0.07 * 9.5)   // 0.07em ≈ tracking in points
-                .foregroundStyle(r.isCompleted ? DS.green : DS.redText)
+                .foregroundStyle(r.isCompleted ? DS.greenText : DS.redText)
                 .lineLimit(1)
             if items.count > 1 {
                 Spacer(minLength: 6)
@@ -231,6 +238,8 @@ struct PermissionRibbonView: View {
 
     // MARK: - Project / branch
 
+    /// Project · branch · agent badge · host glyph (· remote pill). The branch yields first when the
+    /// fixed-width body runs out of room, so the badges always stay visible.
     private func projectLine(_ r: RibbonItem) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
             Text(r.project)
@@ -243,7 +252,10 @@ struct PermissionRibbonView: View {
                     .foregroundStyle(DS.textTertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .layoutPriority(-1)
             }
+            AgentBadge(agent: r.agent).fixedSize()
+            HostGlyph(host: r.host).fixedSize()
             if let label = r.remoteHostLabel {
                 Text(Lf("remote.badge.host", label))
                     .font(.system(size: 9, weight: .semibold))

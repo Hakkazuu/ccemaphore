@@ -50,8 +50,13 @@ enum DeepLinker {
 
     static func focus(_ session: SessionInfo) {
         focus(sessionId: session.id, cwd: session.cwd, host: session.host, hostBundleId: session.hostBundleId,
-              remoteHostId: session.remoteHostId)
+              remoteHostId: session.remoteHostId, hostSessionId: session.hostSessionId)
     }
+
+    /// The Claude desktop app (its Code tab hosts `claude-desktop` sessions). Fixed, documented bundle id.
+    static let claudeDesktopBundleId = "com.anthropic.claudefordesktop"
+    /// ChatGPT.app — the Codex surface (formerly the standalone Codex app; it kept this bundle id).
+    static let codexAppBundleId = "com.openai.codex"
 
     /// Jump to a chat given only its id (+ cwd + host) — the ribbon's "open chat" path. Best-effort, and
     /// leaves a metadata-only breadcrumb (session-id prefix + which step resolved) so a "clicking the chat
@@ -72,15 +77,27 @@ enum DeepLinker {
     ///  - `.unknown`                   → window focus only, same reasoning. Hooks-off Cursor users
     ///                                   still land on the right window; a CLI/ssh session can no
     ///                                   longer be forked into a second client.
+    ///  - `.desktop`                   → raise Claude.app, then its `claude://code/continue` link (which
+    ///                                   takes the app's own `local_<uuid>` handle — `hostSessionId`);
+    ///  - `.codexApp`                  → `codex://threads/<thread_id>` (ChatGPT.app's documented link).
     static func focus(sessionId: String, cwd: String?,
                       host: SessionHost = .unknown, hostBundleId: String? = nil,
-                      remoteHostId: String? = nil) {
-        let sid = sessionId.prefix(8)
+                      remoteHostId: String? = nil, hostSessionId: String? = nil) {
+        let sid = Substring(sidTag(sessionId))
         if let remoteHostId {
             focusRemote(remoteHostId: remoteHostId, cwd: cwd, sid: sid)
             return
         }
+        // A Codex thread is never a Cursor chat, whatever its recorded host says — route by id namespace.
+        if SessionInfo.parseCodexID(sessionId) != nil {
+            focusCodex(sessionId: sessionId, sid: sid)
+            return
+        }
         switch host {
+        case .desktop:
+            focusClaudeDesktop(hostSessionId: hostSessionId, sid: sid)
+        case .codexApp:
+            focusCodex(sessionId: sessionId, sid: sid)
         case .terminal:
             activateHostApp(bundleId: hostBundleId, sid: sid, kind: "terminal")
         case .ide where hostBundleId != nil && hostBundleId == cursorBundleId:
@@ -274,6 +291,35 @@ enum DeepLinker {
         Log.focus.info("jump sid=\(sid) host=\(host.rawValue) window=\(focusedWindow) "
             + "deeplink=\(ok ? "ok" : "FAILED") confirm=\(confirmation)")
         if !ok { Log.focus.warn("jump sid=\(sid): NSWorkspace could not open the cursor:// deep link") }
+    }
+
+    /// Claude desktop: raise the app FIRST (so the jump is never a silent no-op), then ask it to show the
+    /// session via `claude://code/continue?session=local_<uuid>`. The link is implemented in the app
+    /// (its Dock-menu "Continue last session" uses it) but reported as feature-gated in some builds
+    /// ("entry points off"), and it needs the app's own handle, not the transcript uuid — so it is a
+    /// best-effort second step. Never `claude://code/new`: that would start a NEW session.
+    private static func focusClaudeDesktop(hostSessionId: String?, sid: Substring) {
+        activateHostApp(bundleId: claudeDesktopBundleId, sid: sid, kind: "desktop")
+        guard let handle = hostSessionId, handle.hasPrefix("local_"),
+              let url = URL(string: "claude://code/continue?session=\(handle)") else {
+            Log.focus.info("jump sid=\(sid) host=desktop: no local_ session handle → app raised only")
+            return
+        }
+        let ok = NSWorkspace.shared.open(url)
+        Log.focus.info("jump sid=\(sid) host=desktop deeplink=\(ok ? "ok" : "FAILED") handle=\(handle.prefix(14))")
+    }
+
+    /// Codex (ChatGPT.app): the documented `codex://threads/<thread_id>` link opens that exact thread.
+    /// If the scheme isn't handled (ChatGPT.app not installed) fall back to raising the app if present.
+    private static func focusCodex(sessionId: String, sid: Substring) {
+        guard let threadId = SessionInfo.parseCodexID(sessionId),
+              let url = URL(string: "codex://threads/\(threadId)") else {
+            Log.focus.warn("jump sid=\(sid) host=codex: not a codex id → nothing to open")
+            return
+        }
+        let ok = NSWorkspace.shared.open(url)
+        Log.focus.info("jump sid=\(sid) host=codex deeplink=\(ok ? "ok" : "FAILED") thread=\(threadId.prefix(8))")
+        if !ok { activateHostApp(bundleId: codexAppBundleId, sid: sid, kind: "codex") }
     }
 
     /// Best-effort raise of the app a session runs in — a terminal, or an IDE we can't (safely) deep-link

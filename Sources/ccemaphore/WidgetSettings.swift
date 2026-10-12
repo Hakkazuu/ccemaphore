@@ -62,6 +62,13 @@ final class WidgetSettings: ObservableObject {
         var id: String { rawValue }
     }
 
+    /// How the Chats tab groups rows: by traffic-light status (the original), or by product folder
+    /// (`ProductGroups`) with rows sorted by status inside each product.
+    enum Grouping: String, CaseIterable, Identifiable {
+        case status, product
+        var id: String { rawValue }
+    }
+
     @Published var visible: Bool { didSet { d.set(visible, forKey: K.visible) } }
     /// Collapsed-widget opacity (0.25–1.0). Forced to 1.0 by the views while the ribbon/panel is open.
     @Published var opacity: Double { didSet { d.set(opacity, forKey: K.opacity) } }
@@ -78,6 +85,22 @@ final class WidgetSettings: ObservableObject {
     /// text. Still a setting (not a constant) because the log is undocumented and version-fragile —
     /// turning it off is the escape hatch if an IDE update breaks the format. See `IDELogWatcher`.
     @Published var watchIDELog: Bool { didSet { d.set(watchIDELog, forKey: K.watchIDELog) } }
+    /// Read Claude Code's own session registry (`~/.claude/sessions/<pid>.json`, see
+    /// `SessionRegistryReader`) as the primary state source. ON by default — it's Claude Code's own
+    /// word on busy/idle/waiting. A setting because the schema is undocumented: turning it off returns to
+    /// transcript + hook inference alone if a Claude Code update ever changes it.
+    @Published var useSessionRegistry: Bool { didSet { d.set(useSessionRegistry, forKey: K.useSessionRegistry) } }
+    /// Watch Codex (ChatGPT.app) threads under `~/.codex` alongside Claude Code. ON by default when Codex
+    /// is installed; a user with no Codex pays nothing (the watchers aren't even started).
+    @Published var codexEnabled: Bool { didSet { d.set(codexEnabled, forKey: K.codexEnabled) } }
+    /// Let the blocking permission hook WAIT (ribbon with live Allow/Deny) for a chat hosted in the Claude
+    /// DESKTOP app, as it does for IDE chats. OFF until the live interplay with the app's own permission
+    /// card is verified — the hook process reads this via UserDefaults (same bundle id), see
+    /// `PermissionBroker.desktopWaitDefaultsKey`.
+    @Published var desktopPermissionWait: Bool { didSet { d.set(desktopPermissionWait, forKey: K.desktopPermissionWait) } }
+    @Published var grouping: Grouping { didSet { d.set(grouping.rawValue, forKey: K.grouping) } }
+    /// Session ids whose row is expanded to show sub-agents (the chevron). Remembered across launches.
+    @Published private var expandedSessions: Set<String> { didSet { d.set(Array(expandedSessions), forKey: K.expandedSessions) } }
 
     /// Which settings sections are currently EXPANDED (by section id). Default empty = every section
     /// collapsed, so the (long) Settings tab opens compact and the user expands only what they need. The
@@ -102,6 +125,11 @@ final class WidgetSettings: ObservableObject {
         static let lastDisplayID = "widget.lastDisplayID"
         static let watchIDELog = "widget.watchIDELog"
         static let expandedSections = "settings.expandedSections"
+        static let useSessionRegistry = "claude.useSessionRegistry"
+        static let codexEnabled = "codex.enabled"
+        static let desktopPermissionWait = PermissionBroker.desktopWaitDefaultsKey
+        static let expandedSessions = "sessions.expanded"
+        static let grouping = "panel.grouping"
     }
 
     private init() {
@@ -115,6 +143,11 @@ final class WidgetSettings: ObservableObject {
         displayMode = DisplayMode(rawValue: d.string(forKey: K.displayMode) ?? "") ?? .summary
         orientation = Orientation(rawValue: d.string(forKey: K.orientation) ?? "") ?? .vertical
         watchIDELog = d.object(forKey: K.watchIDELog) as? Bool ?? true   // default ON (see doc above)
+        useSessionRegistry = d.object(forKey: K.useSessionRegistry) as? Bool ?? true
+        codexEnabled = d.object(forKey: K.codexEnabled) as? Bool ?? true
+        desktopPermissionWait = d.bool(forKey: K.desktopPermissionWait)   // default OFF (see doc above)
+        expandedSessions = Set(d.stringArray(forKey: K.expandedSessions) ?? [])
+        grouping = Grouping(rawValue: d.string(forKey: K.grouping) ?? "") ?? .status
         expandedSections = Set(d.stringArray(forKey: K.expandedSections) ?? [])   // default: all collapsed
         positions = Self.decodePositions(d.data(forKey: K.positions))
         lastDisplayID = d.string(forKey: K.lastDisplayID)
@@ -126,6 +159,23 @@ final class WidgetSettings: ObservableObject {
 
     func toggleSection(_ id: String) {
         if expandedSections.contains(id) { expandedSections.remove(id) } else { expandedSections.insert(id) }
+    }
+
+    // MARK: - Expandable session rows (sub-agents)
+
+    func isSessionExpanded(_ id: String) -> Bool { expandedSessions.contains(id) }
+    /// Read-only view of the remembered set (the engine's prune keeps Codex ids while Codex is off).
+    var expandedSessionIDs: Set<String> { expandedSessions }
+
+    func toggleSessionExpanded(_ id: String) {
+        if expandedSessions.contains(id) { expandedSessions.remove(id) } else { expandedSessions.insert(id) }
+    }
+
+    /// Drop remembered expansions for chats that no longer exist, so the set (and its UserDefaults array)
+    /// stays bounded to the live list. Writes only when something was actually pruned.
+    func pruneExpandedSessions(keeping live: Set<String>) {
+        let kept = expandedSessions.intersection(live)
+        if kept.count != expandedSessions.count { expandedSessions = kept }
     }
 
     // MARK: - Per-display position

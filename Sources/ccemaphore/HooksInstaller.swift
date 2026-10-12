@@ -45,14 +45,17 @@ enum HooksInstaller {
     /// Why a mutation was refused. Surfaced to the user instead of silently corrupting their file.
     enum HookError: LocalizedError {
         case unparseableSettings(String)
-        case unexpectedShape(String)
+        /// In the JSON file named `file` (settings.json, Codex's hooks.json), `shapeKey` — a `shape.*` string,
+        /// `arg` filling its placeholder — says what's wrong. Kept as a key and resolved in
+        /// `errorDescription`, so a message on screen follows a later language switch.
+        case unexpectedShape(file: String, shapeKey: String, arg: String? = nil)
 
         var errorDescription: String? {
             switch self {
             case .unparseableSettings(let path):
                 return Lf("error.settings.unparseable", path)
-            case .unexpectedShape(let what):
-                return Lf("error.settings.unexpectedShape", what)
+            case .unexpectedShape(let file, let key, let arg):
+                return Lf("error.settings.unexpectedShape", file, arg.map { Lf(key, $0) } ?? L(key))
             }
         }
     }
@@ -161,10 +164,10 @@ enum HooksInstaller {
     /// The interactive permission entry we own — the `PermissionRequest` hook, which fires precisely when
     /// Claude shows a permission dialog. `timeout` here is Claude Code's outer kill-deadline; the hook's
     /// actual wait is the (shorter) `Tuning.permissionPollTimeout`, so this must stay above it.
-    static func permissionEntry(exe: String) -> [String: Any] {
+    static func permissionEntry(exe: String, agent: AgentKind = .claude) -> [String: Any] {
         ["matcher": permissionMatcher, "hooks": [[
             "type": "command",
-            "command": command(keyword: "permission-request", exe: exe),
+            "command": command(keyword: "permission-request", exe: exe, agent: agent),
             "timeout": 300,
         ]]]
     }
@@ -284,10 +287,10 @@ enum HooksInstaller {
 
     // MARK: - Entry construction
 
-    static func entry(keyword: String, matcher: Bool, exe: String) -> [String: Any] {
+    static func entry(keyword: String, matcher: Bool, exe: String, agent: AgentKind = .claude) -> [String: Any] {
         let hook: [String: Any] = [
             "type": "command",
-            "command": command(keyword: keyword, exe: exe),
+            "command": command(keyword: keyword, exe: exe, agent: agent),
             "timeout": 10,
         ]
         var entry: [String: Any] = ["hooks": [hook]]
@@ -295,9 +298,11 @@ enum HooksInstaller {
         return entry
     }
 
-    /// `"<escaped-exe>" --hook <keyword>` — the exact command we own. Quoted + escaped for /bin/sh.
-    static func command(keyword: String, exe: String) -> String {
-        "\(shQuote(exe)) --hook \(keyword)"
+    /// `"<escaped-exe>" --hook <keyword>` — the exact command we own. Quoted + escaped for /bin/sh. For a
+    /// non-Claude agent the explicit ` --agent <kind>` suffix tells the hook process whose payload it reads
+    /// (never inferred from the id format or the transcript path — see `CodexHooksInstaller`).
+    static func command(keyword: String, exe: String, agent: AgentKind = .claude) -> String {
+        agent == .claude ? "\(shQuote(exe)) --hook \(keyword)" : "\(shQuote(exe)) --hook \(keyword) --agent \(agent.rawValue)"
     }
 
     /// Wrap a path in double quotes and escape the characters still special inside "" for /bin/sh.
@@ -355,7 +360,13 @@ enum HooksInstaller {
     /// Strict read for mutation. Distinguishes "file absent" (ok → start fresh) from "file present but
     /// unparseable / wrong root type" (throw — never overwrite a file we couldn't understand).
     private static func loadSettingsStrict() throws -> [String: Any] {
-        try parseSettingsStrict(data: FileManager.default.contents(atPath: settingsPath), path: settingsPath)
+        try loadStrict(path: settingsPath)
+    }
+
+    /// Strict load of any hooks-bearing JSON file (settings.json, Codex's hooks.json). Shared with
+    /// `CodexHooksInstaller`.
+    static func loadStrict(path: String) throws -> [String: Any] {
+        try parseSettingsStrict(data: FileManager.default.contents(atPath: path), path: path)
     }
 
     /// Transport-free strict parse — the pure half of `loadSettingsStrict`, SHARED with
@@ -367,7 +378,7 @@ enum HooksInstaller {
             throw HookError.unparseableSettings(path)
         }
         guard let dict = obj as? [String: Any] else {
-            throw HookError.unexpectedShape(L("shape.rootNotObject"))
+            throw HookError.unexpectedShape(file: (path as NSString).lastPathComponent, shapeKey: "shape.rootNotObject")
         }
         return dict
     }
@@ -381,25 +392,32 @@ enum HooksInstaller {
         )
     }
 
-    static func hooksObject(_ root: [String: Any]) throws -> [String: Any] {
+    /// `file` names the JSON file in the error: the default is Claude Code's (the merges above work on it,
+    /// locally and over SSH); `CodexHooksInstaller` passes its hooks.json.
+    static func hooksObject(_ root: [String: Any], file: String = "settings.json") throws -> [String: Any] {
         guard let v = root["hooks"] else { return [:] }
-        guard let dict = v as? [String: Any] else { throw HookError.unexpectedShape(L("shape.hooksNotObject")) }
+        guard let dict = v as? [String: Any] else {
+            throw HookError.unexpectedShape(file: file, shapeKey: "shape.hooksNotObject")
+        }
         return dict
     }
 
-    static func eventArray(_ hooks: [String: Any], _ event: String) throws -> [[String: Any]] {
+    static func eventArray(_ hooks: [String: Any], _ event: String, file: String = "settings.json") throws -> [[String: Any]] {
         guard let v = hooks[event] else { return [] }
         guard let arr = v as? [[String: Any]] else {
-            throw HookError.unexpectedShape(Lf("shape.eventNotArray", event))
+            throw HookError.unexpectedShape(file: file, shapeKey: "shape.eventNotArray", arg: event)
         }
         return arr
     }
 
-    private static func writeSettings(_ root: [String: Any]) throws {
-        let dir = (settingsPath as NSString).deletingLastPathComponent
+    private static func writeSettings(_ root: [String: Any]) throws { try write(root, to: settingsPath) }
+
+    /// Atomic write of a hooks-bearing JSON file (temp file + rename, so a crash can't truncate it).
+    /// Shared with `CodexHooksInstaller`.
+    static func write(_ root: [String: Any], to path: String) throws {
+        let dir = (path as NSString).deletingLastPathComponent
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let data = try encodeSettings(root)
-        // Atomic: writes to a temp file and renames into place, so a crash can't truncate the file.
-        try data.write(to: URL(fileURLWithPath: settingsPath), options: [.atomic])
+        try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
     }
 }

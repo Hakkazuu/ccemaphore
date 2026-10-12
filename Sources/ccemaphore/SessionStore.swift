@@ -21,6 +21,9 @@ actor SessionStore {
 
     private var records: [String: SessionRecord] = [:]      // sessionId -> last classified record
     private var subagentActivity: [String: Date] = [:]      // parentId -> last time a Task sub-agent was active
+    /// parentId → childId → what we know about that sub-agent / workflow agent, for the expandable row
+    /// (`SessionInfo.children`). Informational: the parent's working/done fold above stays the authority.
+    private var children: [String: [String: ChildRecord]] = [:]
     // sessionId -> (workflowId -> last fan-out-agent write). A workflow is "live" (keeps the chat
     // working) from its first agent until its completion record lands or it ages past workflowLiveWindow.
     private var liveWorkflows: [String: [String: Date]] = [:]
@@ -47,7 +50,11 @@ actor SessionStore {
             case .session(let id, let slug):
                 classifySession(id: id, slug: slug, path: path, now: now)
             case .subagent(let parentId, _, let workflowId):
-                if subagentIsActive(path: path, now: now) {
+                // One tail read + decode serves both the child record and the parent's working fold.
+                let parsed = TailReader.tailLines(path: path).compactMap(LogLine.decode)
+                let tail = subagentTail(parsed, now: now)
+                noteChild(parentId: parentId, path: path, workflowId: workflowId, tail: tail)
+                if tail?.active == true {
                     if let workflowId {
                         // Workflow fan-out agent: track per-workflow so the run's completion record can
                         // retire it precisely, rather than leaning on the coarse sub-agent grace.
@@ -102,15 +109,18 @@ actor SessionStore {
             //    lands. This is what bridges a workflow's quiet stretches without flipping to "done", and
             //    (because the record retires it) lets a finished workflow settle at the exact edge instead
             //    of riding out a fixed grace.
+            var viaChildren = false
             if let ts = subagentActivity[id], now.timeIntervalSince(ts) <= Tuning.subagentGrace {
+                viaChildren = resolvedState != .working
                 resolvedState = .working
             }
             if liveWorkflowActivity(id, now: now) != nil {
+                viaChildren = viaChildren || resolvedState != .working
                 resolvedState = .working
             }
 
             guard resolvedState != .stale else { continue }
-            infos.append(SessionInfo(
+            var info = SessionInfo(
                 id: id,
                 project: rec?.project ?? "—",
                 cwd: rec?.cwd,
@@ -119,9 +129,97 @@ actor SessionStore {
                 state: resolvedState,
                 lastActivity: rec?.lastRealTimestamp ?? liveWorkflowActivity(id, now: now) ?? subagentActivity[id] ?? now,
                 context: rec?.context
-            ))
+            )
+            info.children = childAgents(of: id, now: now)
+            info.workingViaChildren = viaChildren
+            infos.append(info)
         }
         return sortedForDisplay(infos)
+    }
+
+    /// The parent's sub-agents seen within `staleWindow`, freshest first. A child is `working` while its
+    /// own tail is mid-turn and recent (the same test that feeds the parent's fold), else `done`.
+    private func childAgents(of parentId: String, now: Date) -> [ChildAgent] {
+        guard let kids = children[parentId] else { return [] }
+        return kids.compactMap { id, c -> ChildAgent? in
+            guard now.timeIntervalSince(c.lastActivity) <= staleWindow else { return nil }
+            let working = c.active && now.timeIntervalSince(c.lastActivity) <= Tuning.subagentGrace
+            return ChildAgent(id: id, name: c.name, kind: c.kind, state: working ? .working : .done,
+                              lastActivity: c.lastActivity, title: c.title)
+        }.sorted { $0.lastActivity > $1.lastActivity }
+    }
+
+    /// Record (or refresh) one sub-agent transcript under its parent. The child's id is the `agent-<id>`
+    /// file stem; its title is the Task prompt (the transcript's first user line), read once from the file
+    /// head — the parent's `Task` tool_use carries the human description, but that lives in the PARENT's
+    /// transcript, not here, so the prompt's first line is the best self-contained label we have.
+    private func noteChild(parentId: String, path: String, workflowId: String?, tail: (lastTs: Date, active: Bool)?) {
+        guard let tail else { return }
+        let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        let childId = stem.hasPrefix("agent-") ? String(stem.dropFirst("agent-".count)) : stem
+        var rec = children[parentId]?[childId] ?? ChildRecord(
+            name: workflowId.map { "\($0) · \(childId.prefix(6))" } ?? String(childId.prefix(8)),
+            kind: workflowId == nil ? .subagent : .workflow,
+            lastActivity: tail.lastTs, active: tail.active, title: nil, titleResolved: false)
+        rec.lastActivity = max(rec.lastActivity, tail.lastTs)
+        rec.active = tail.active
+        if !rec.titleResolved {
+            // One head read per child once its first line is complete: that line is the Task prompt or it
+            // isn't. A file still being flushed (FSEvents fires on creation, before the large first user
+            // line is fully written) is simply re-read on the next event instead of being marked resolved.
+            switch Self.firstPrompt(path: path) {
+            case .pending:
+                break
+            case .none:
+                rec.titleResolved = true
+            case .prompt(let p):
+                rec.title = truncate(p)
+                rec.titleResolved = true
+            }
+        }
+        children[parentId, default: [:]][childId] = rec
+    }
+
+    /// (last real timestamp, is the agent mid-turn right now) for an already-decoded sub-agent tail. nil
+    /// when the tail has no real line. Shared by the child record and the parent's working fold.
+    private func subagentTail(_ parsed: [LogLine], now: Date) -> (lastTs: Date, active: Bool)? {
+        let real = parsed.filter { ($0.type == "assistant" || $0.type == "user") && $0.timestamp != nil }
+        guard let last = real.last, let ts = parseTimestamp(last.timestamp) else { return nil }
+        var active = now.timeIntervalSince(ts) <= activeWindow
+        if last.type == "assistant", let sr = last.message?.stopReason, sr == "end_turn" || sr == "stop_sequence" {
+            active = false
+        }
+        return (ts, active)
+    }
+
+    /// What the head of a sub-agent transcript says about its Task prompt.
+    private enum FirstLine {
+        /// The first line isn't fully flushed yet — ask again on the next event.
+        case pending
+        /// A complete first line that is not a user prompt (or one too long to be a label).
+        case none
+        case prompt(String)
+    }
+
+    /// The first user line's text (the Task prompt) from the head of a sub-agent transcript.
+    private static func firstPrompt(path: String) -> FirstLine {
+        guard let h = FileHandle(forReadingAtPath: path) else { return .pending }
+        defer { try? h.close() }
+        let cap = 64 * 1024
+        guard let data = try? h.read(upToCount: cap), !data.isEmpty else { return .pending }
+        guard let nl = data.firstIndex(of: UInt8(ascii: "\n")) else {
+            return data.count >= cap ? .none : .pending
+        }
+        let line = String(decoding: data[data.startIndex..<nl], as: UTF8.self)
+        guard let obj = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+              obj["type"] as? String == "user",
+              let msg = obj["message"] as? [String: Any] else { return .none }
+        if let text = msg["content"] as? String { return .prompt(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        if let blocks = msg["content"] as? [[String: Any]],
+           let t = blocks.first(where: { $0["type"] as? String == "text" })?["text"] as? String {
+            return .prompt(t.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return .none
     }
 
     /// Freshest still-live workflow write for a session, or nil if none within the live window. A
@@ -152,6 +250,10 @@ actor SessionStore {
     ///    cwd/branch/title/context for display, so a chat kept alive by them must keep its record).
     private func pruneStale(now: Date) {
         subagentActivity = subagentActivity.filter { now.timeIntervalSince($0.value) <= staleWindow }
+        children = children.compactMapValues { kids in
+            let live = kids.filter { now.timeIntervalSince($0.value.lastActivity) <= staleWindow }
+            return live.isEmpty ? nil : live
+        }
         records = records.filter { id, rec in
             if now.timeIntervalSince(rec.lastRealTimestamp) <= staleWindow { return true }
             if let ts = subagentActivity[id], now.timeIntervalSince(ts) <= Tuning.subagentGrace { return true }
@@ -218,18 +320,6 @@ actor SessionStore {
         records[id] = record
     }
 
-    private func subagentIsActive(path: String, now: Date) -> Bool {
-        let parsed = TailReader.tailLines(path: path).compactMap(LogLine.decode)
-        let real = parsed.filter {
-            ($0.type == "assistant" || $0.type == "user") && $0.timestamp != nil
-        }
-        guard let last = real.last, let ts = parseTimestamp(last.timestamp) else { return false }
-        if now.timeIntervalSince(ts) > activeWindow { return false }
-        if last.type == "assistant", let sr = last.message?.stopReason,
-           sr == "end_turn" || sr == "stop_sequence" { return false }
-        return true
-    }
-
     // MARK: - Helpers
 
     private func parseTimestamp(_ s: String?) -> Date? {
@@ -255,6 +345,16 @@ actor SessionStore {
         return ContextInfo(usedPercent: Double(used) / Double(size) * 100,
                            sizeTokens: size, inputTokens: used)
     }
+}
+
+/// One sub-agent / workflow agent under a parent chat (see `SessionStore.noteChild`).
+private struct ChildRecord {
+    var name: String
+    var kind: ChildAgent.Kind
+    var lastActivity: Date
+    var active: Bool
+    var title: String?
+    var titleResolved: Bool
 }
 
 /// Internal per-session record: raw signals, so `state(of:now:)` can re-derive the state on a timer

@@ -86,7 +86,7 @@ struct RemoteHostsView: View {
                 Button(action: addHost) {
                     Text(L("remote.host.add"))
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(canAdd ? DS.primaryText : DS.textTertiary)
+                        .foregroundStyle(canAdd ? DS.onGreen : DS.textTertiary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 5)
                         .background(
@@ -200,7 +200,7 @@ private struct RemoteHostRow: View {
                     case .success(let platform):
                         Text(L("remote.connection.success") + " (\(platform.isEmpty ? L("remote.platform.unknown") : platform))")
                             .font(.system(size: 9))
-                            .foregroundStyle(DS.green)
+                            .foregroundStyle(DS.greenText)
                     case .failure(let e):
                         Text(Lf("remote.connection.failed", e.message))
                             .font(.system(size: 9))
@@ -212,7 +212,7 @@ private struct RemoteHostRow: View {
                     case .installed:
                         Text(L("remote.hooks.installed"))
                             .font(.system(size: 9))
-                            .foregroundStyle(DS.green)
+                            .foregroundStyle(DS.greenText)
                     case .failed(let msg):
                         Text(Lf("remote.hooks.install.failed", host.label, msg))
                             .font(.system(size: 9))

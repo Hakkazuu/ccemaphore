@@ -18,6 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The menu-bar status item (v3 — a manual NSStatusItem, see StatusItemController's doc comment
         // for why SwiftUI's MenuBarExtra can't support right-click-pins/left-click-menu).
         StatusItemController.shared.start()
+        // In-app updates (Sparkle): gates, consent, one-shot notes after an update. Last, so its first
+        // phase lands on surfaces that already exist.
+        AppUpdater.shared.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

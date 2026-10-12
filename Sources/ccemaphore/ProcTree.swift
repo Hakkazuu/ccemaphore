@@ -85,11 +85,47 @@ enum ProcTree {
     /// The session's owner pid + where it's hosted, from ONE ancestry walk. Called by `HookHandler.
     /// writeStatus`, so it runs in the short-lived hook process where the ancestry IS the Claude Code
     /// session's own tree. See `SessionHost`.
-    static func sessionContext() -> (ownerPid: pid_t?, host: SessionHost, hostBundleId: String?) {
+    static func sessionContext(agent: AgentKind = .claude) -> (ownerPid: pid_t?, host: SessionHost, hostBundleId: String?, entrypoint: String?) {
         let chain = ancestry()
         let owner = ownerPID(in: chain)
-        let (host, bundleId) = classifyHost(chain)
-        return (owner, host, bundleId)
+        var (host, bundleId) = classifyHost(chain)
+        // A Codex hook's owner is the `codex` app-server binary. Bundled inside ChatGPT.app (or the
+        // standalone Codex.app of older installs) ⇒ the Codex desktop surface; otherwise the CLI/TUI in
+        // whatever terminal the walk found.
+        if agent == .codex {
+            if chain.contains(where: { $0.path.contains("/ChatGPT.app/") || $0.path.contains("/Codex.app/") }) {
+                return (owner, .codexApp, DeepLinker.codexAppBundleId, nil)
+            }
+            return (owner, host == .ide ? .unknown : host, host == .ide ? nil : bundleId, nil)
+        }
+        // Claude Code tells its children where it runs: `CLAUDE_CODE_ENTRYPOINT` (`claude-desktop`,
+        // `claude-vscode`, `cli`, …) is inherited by every hook process. It is authoritative for the
+        // desktop app — whose process tree (claude ← `disclaimer --pgroup` ← Claude Helper ← Claude.app)
+        // matches none of the IDE/terminal markers and used to classify as `.unknown` — and it confirms an
+        // IDE chat whose extension-dir marker the walk missed. The walk still decides terminal vs.
+        // IDE-integrated-terminal for a plain `cli` entrypoint (the env can't tell those apart).
+        let entrypoint = ProcessInfo.processInfo.environment["CLAUDE_CODE_ENTRYPOINT"].flatMap { $0.isEmpty ? nil : $0 }
+        // A `claude` spawned FROM a session's tool (`claude -p …` in Bash) inherits the OUTER session's
+        // entrypoint, yet has no tab and no native prompt of its own — the env must not promote it (the
+        // bounded IDE scan in `classifyHost` exists for exactly this case). Nesting = another `claude`
+        // above the owner in the chain; a node-hosted outer session (`node cli.js`) isn't recognised, so
+        // that rarer shape keeps the plain env behaviour.
+        let nested = ownerIndex(in: chain).map { i in
+            chain.dropFirst(i + 1).contains { ($0.path as NSString).lastPathComponent == "claude" }
+        } ?? false
+        if !nested {
+            switch entrypoint {
+            case "claude-desktop":
+                host = .desktop
+                bundleId = DeepLinker.claudeDesktopBundleId
+            case "claude-vscode" where host == .unknown:
+                host = .ide
+                bundleId = firstAppBundleId(in: chain)
+            default:
+                break
+            }
+        }
+        return (owner, host, bundleId, entrypoint)
     }
 
     /// Path substrings that mark an ancestor as an IDE host running the Claude Code EXTENSION — the only

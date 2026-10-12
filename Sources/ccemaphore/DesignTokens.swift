@@ -46,6 +46,12 @@ enum DS {
 
     /// "Требуется разрешение" / "Запретить" labels (red, theme-tuned: brighter on dark, deeper on light).
     static let redText = dynamic(dark: Color(hex: 0xFF6961), light: Color(hex: 0xD7372B))
+    /// Green labels ("Add", "on", "connected", "Done"): the lamp green reads at about 2:1 on the light panel,
+    /// so light mode uses a deeper green (about 4.9:1); dark keeps the lamp green.
+    static let greenText = dynamic(dark: green, light: Color(hex: 0x1E7A34))
+    /// A label on a lamp-green fill, in both appearances. `primaryText` belongs to `primaryFill` and is white
+    /// in light mode — about 2:1 on the green; this near-black is about 9:1.
+    static let onGreen = Color(hex: 0x15151A)
     /// Context bar amber for the 65–79% band (≥80% uses `redText`).
     static let ctxWarning = Color(hex: 0xFFB340)
 

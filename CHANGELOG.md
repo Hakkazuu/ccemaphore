@@ -5,7 +5,7 @@ All notable changes to **ccemaphore** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.0] - 2026-10-09
+## [1.3.0] - 2026-10-12
 
 **The last manual install.** 1.3.0 is the first version that updates itself. Coming from 1.2.x or
 earlier, download it from the Releases page and drag it over the old copy one last time — from here on,

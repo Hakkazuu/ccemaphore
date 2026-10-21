@@ -1,50 +1,24 @@
 import SwiftUI
 
-/// The "Remote Hosts" settings section: list configured SSH hosts (connection dot, enable toggle, test/
-/// remove) plus a compact add form. Embedded into `FloatingPanelView.settingsScreen` the same way
-/// `WidgetQuickSettingsView`/the trusted-commands section are — this file owns only the section's own
-/// layout, not the panel chrome around it.
+/// Settings › SSH: the configured remote hosts (connection dot, enable toggle, test / install hooks / remove)
+/// and a button that opens the add form (`RemoteHostAddForm`, the `addRemoteHost` sub-screen). This file owns
+/// only the page's own layout, not the settings chrome around it (`SettingsScreen`).
 ///
-/// Every text field gets its own caption label ABOVE it plus a visible boxed background (not just a
-/// bare placeholder on transparent ground) — an earlier version relied on placeholder text alone and
-/// users couldn't tell the fields were editable at all. Same for the row actions ("Test Connection" /
-/// "Install hooks"): they're real filled pill buttons now, not plain text that reads as a caption.
+/// Remote monitoring covers Claude Code only (remote transcripts under `~/.claude/projects`, hooks in the
+/// remote `~/.claude/settings.json`); the explainer says so, since a Codex user would otherwise expect it.
 ///
-/// A brand-new top-level view per CLAUDE.md's localization rule 4: it observes `LocalizationManager`
-/// directly (its own `@State` doesn't change on a language switch, so SwiftUI would otherwise skip
-/// re-invoking `body` and leave the `L(...)` labels stale).
+/// A top-level view per CLAUDE.md's localization rule 4: it observes `LocalizationManager` directly.
 struct RemoteHostsView: View {
     @ObservedObject var engine: StateEngine
+    let onAdd: () -> Void
     @ObservedObject private var loc = LocalizationManager.shared
-    /// When hosted inside a collapsible settings section, the wrapper draws the section header, so this
-    /// view skips its own (mirrors `WidgetQuickSettingsView.embedded`).
-    var embedded: Bool = false
-
-    @State private var newLabel = ""
-    @State private var newHostname = ""
-    @State private var newUser = ""
-    @State private var newPort = ""
-    @State private var newIdentityFile = ""
-    @State private var newUseSSHConfigOnly = false
 
     var body: some View {
         VStack(spacing: 0) {
-            if !embedded { SettingsSectionHeader(label: L("remote.menu.title")) }
-            Text(L("remote.explainer"))
-                .font(.system(size: 10))
-                .foregroundStyle(DS.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 6)
-
+            SettingsCaption(text: L("remote.explainer"))
+                .padding(.top, 8)
             if engine.remoteHosts.isEmpty {
-                Text(L("remote.list.empty"))
-                    .font(.system(size: 10))
-                    .foregroundStyle(DS.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 4)
+                SettingsCaption(text: L("remote.list.empty"))
             } else {
                 ForEach(engine.remoteHosts) { host in
                     RemoteHostRow(
@@ -59,57 +33,73 @@ struct RemoteHostsView: View {
                     )
                 }
             }
-
-            addForm
+            SettingsAddButton(title: L("remote.host.add"), action: onAdd)
         }
     }
+}
 
-    private var addForm: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Rectangle().fill(DS.line).frame(height: 1).padding(.bottom, 2)
+/// SSH › Add Remote Host: the new host's fields. Every text field gets its own caption ABOVE it plus a visible
+/// boxed background (not just a bare placeholder on transparent ground) — an earlier version relied on
+/// placeholder text alone and users couldn't tell the fields were editable at all. Adding returns to the list.
+struct RemoteHostAddForm: View {
+    @ObservedObject var engine: StateEngine
+    let onAdded: () -> Void
+    @ObservedObject private var loc = LocalizationManager.shared
 
+    @State private var label = ""
+    @State private var hostname = ""
+    @State private var user = ""
+    @State private var port = ""
+    @State private var identityFile = ""
+    @State private var useSSHConfigOnly = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                labeledField(L("remote.host.label"), text: $newLabel, width: 84)
-                labeledField(L("remote.host.hostname"), text: $newHostname, mono: true)
+                labeledField(L("remote.host.label"), text: $label, width: 96)
+                labeledField(L("remote.host.hostname"), text: $hostname, mono: true)
             }
             HStack(spacing: 8) {
-                labeledField(L("remote.host.user"), text: $newUser, width: 84, mono: true)
-                labeledField(L("remote.host.port"), text: $newPort, width: 48, mono: true)
+                labeledField(L("remote.host.user"), text: $user, mono: true)
+                labeledField(L("remote.host.port"), text: $port, width: 64, mono: true)
             }
-            labeledField(L("remote.host.identityFile"), text: $newIdentityFile, mono: true)
+            labeledField(L("remote.host.identityFile"), text: $identityFile, mono: true)
 
             HStack {
-                Toggle(L("remote.host.useSSHConfig"), isOn: $newUseSSHConfigOnly)
+                Toggle(L("remote.host.useSSHConfig"), isOn: $useSSHConfigOnly)
                     .toggleStyle(.checkbox)
                     .font(.system(size: 10))
                 Spacer()
-                Button(action: addHost) {
-                    Text(L("remote.host.add"))
-                        .font(.system(size: 10, weight: .semibold))
+                Button(action: add) {
+                    Text(L("settings.trusted.add"))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(canAdd ? DS.onGreen : DS.textTertiary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
                         .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
                                 .fill(canAdd ? DS.green : DS.neutralBtn)
                         )
+                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(!canAdd)
+                .animation(DS.settingsFade, value: canAdd)
             }
-            .padding(.top, 2)
+            .padding(.top, 4)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.top, 4)
     }
 
-    /// A small mono caption ABOVE a boxed, bordered `TextField` — never a bare placeholder on
-    /// transparent ground, so it reads unambiguously as "type here" rather than static label text.
+    /// A small caption ABOVE a boxed, bordered `TextField` — never a bare placeholder on transparent ground,
+    /// so it reads unambiguously as "type here" rather than static label text.
     private func labeledField(_ caption: String, text: Binding<String>, width: CGFloat? = nil, mono: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(caption)
                 .font(.system(size: 9.5, weight: .semibold))
                 .foregroundStyle(DS.textTertiary)
+                .lineLimit(1)
             TextField("", text: text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 11, design: mono ? .monospaced : .default))
@@ -122,35 +112,43 @@ struct RemoteHostsView: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(DS.line, lineWidth: 1)
                 )
+                .accessibilityLabel(caption)
         }
         .frame(width: width)
         .frame(maxWidth: width == nil ? .infinity : nil)
     }
 
     private var canAdd: Bool {
-        let host = newHostname.trimmingCharacters(in: .whitespaces)
+        let host = trimmed(hostname)
         // A hostname starting with `-` would be parsed by ssh as an option (already defused by `--` in
         // RemoteExec.connectionArgs, but block it at entry too); whitespace inside is never a valid host.
-        // Invalid input just keeps "Add" disabled, matching how empty fields already do — no new string.
-        return !newLabel.trimmingCharacters(in: .whitespaces).isEmpty
+        // A port, when given, must be a real one — not silently dropped to ssh's default. Invalid input just
+        // keeps "Add" disabled, matching how empty fields already do — no new string.
+        return !trimmed(label).isEmpty
             && !host.isEmpty
             && !host.hasPrefix("-")
             && !host.contains(where: \.isWhitespace)
+            && (trimmed(port).isEmpty || parsedPort != nil)
     }
 
-    private func addHost() {
+    /// The port as typed, when it is one (1…65535); nil for an empty field or anything else.
+    private var parsedPort: Int? {
+        Int(trimmed(port)).flatMap { (1...65535).contains($0) ? $0 : nil }
+    }
+
+    private func trimmed(_ s: String) -> String { s.trimmingCharacters(in: .whitespaces) }
+
+    private func add() {
         guard canAdd else { return }
-        let host = RemoteHost(
-            label: newLabel.trimmingCharacters(in: .whitespaces),
-            hostname: newHostname.trimmingCharacters(in: .whitespaces),
-            sshUser: newUser.isEmpty ? nil : newUser,
-            port: Int(newPort),
-            identityFile: newIdentityFile.isEmpty ? nil : newIdentityFile,
-            useSSHConfigOnly: newUseSSHConfigOnly
-        )
-        engine.addRemoteHost(host)
-        newLabel = ""; newHostname = ""; newUser = ""; newPort = ""; newIdentityFile = ""
-        newUseSSHConfigOnly = false
+        engine.addRemoteHost(RemoteHost(
+            label: trimmed(label),
+            hostname: trimmed(hostname),
+            sshUser: trimmed(user).isEmpty ? nil : trimmed(user),
+            port: parsedPort,
+            identityFile: trimmed(identityFile).isEmpty ? nil : trimmed(identityFile),
+            useSSHConfigOnly: useSSHConfigOnly
+        ))
+        onAdded()
     }
 }
 

@@ -14,7 +14,9 @@ import Darwin
 /// within one poll interval; the monotonic counter survives that overwrite and is what the broker's
 /// external-resolution check compares against its baseline. See memory/permission-stale-ribbon-incident.
 enum HookHandler {
-    static let statusDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/status")
+    /// `CCEMAPHORE_STATUS_DIR` is the test seam (a fixture dir for `--codex-watch` replays).
+    static let statusDir = ProcessInfo.processInfo.environment["CCEMAPHORE_STATUS_DIR"].flatMap { $0.isEmpty ? nil : $0 }
+        ?? (NSHomeDirectory() as NSString).appendingPathComponent(".claude/status")
 
     /// The agent a payload belongs to. The installed command's `--agent` tag is authoritative; absent it,
     /// a `transcript_path` under Codex's home is the one safe inference — it catches the imported,
@@ -25,6 +27,19 @@ enum HookHandler {
         if let tp = payload["transcript_path"] as? String,
            tp.hasPrefix(CodexPaths.sessionsRoot + "/") || tp.contains("/.codex/sessions/") { return .codex }
         return declared
+    }
+
+    /// The status key a hook payload writes to. Claude: its `session_id`. Codex: `codex:<thread_id>` of the
+    /// thread the hook RAN in — taken from `transcript_path` (the rollout's file name ends in that thread's
+    /// id), because Codex's `session_id` is the ROOT session's id even inside a sub-agent thread, and the
+    /// hook overlay must know which thread is waiting (`CodexHookOverlay` maps it to the listed chat).
+    /// Falls back to `session_id` when the path is absent or isn't a rollout. nil without any id.
+    static func statusKey(agent: AgentKind, payload: [String: Any]) -> String? {
+        let rawSid = (payload["session_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        guard agent == .codex else { return rawSid }
+        let fromPath = (payload["transcript_path"] as? String)
+            .flatMap { CodexPaths.threadId(fromRolloutName: ($0 as NSString).lastPathComponent) }
+        return (fromPath ?? rawSid?.lowercased()).map(SessionInfo.codexID)
     }
 
     /// Status files are keyed by session id; a Codex id is namespaced `codex:<thread_id>` and the `:`
@@ -46,12 +61,11 @@ enum HookHandler {
     static func run(_ event: String, agent: AgentKind = .claude) {
         let data = FileHandle.standardInput.readDataToEndOfFile()
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        guard let rawSid = json["session_id"] as? String, !rawSid.isEmpty else {
+        let agent = resolvedAgent(declared: agent, payload: json)
+        guard let sid = statusKey(agent: agent, payload: json) else {
             Log.hooks.warn("hook=\(event) agent=\(agent.rawValue) ignored: missing/empty session_id (\(data.count)B stdin)")
             return
         }
-        let agent = resolvedAgent(declared: agent, payload: json)
-        let sid = agent == .codex ? SessionInfo.codexID(threadId: rawSid.lowercased()) : rawSid
         // `pre`/`post` fire for EVERY tool (hundreds/day) — they're heartbeats, so log them at debug to
         // keep the info stream scannable for state-meaningful events (start/stop/precompact/prompt/notify).
         // Debug is still persisted to the log file, just filtered out of an info-level scan.

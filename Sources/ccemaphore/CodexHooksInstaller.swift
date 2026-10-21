@@ -1,35 +1,38 @@
 import Foundation
-import CryptoKit
 
 /// Installs/removes ccemaphore's hooks in Codex's `~/.codex/hooks.json` (user scope → every Codex thread,
 /// in ChatGPT.app and the CLI alike). Same JSON shape as Claude Code's `settings.json` `hooks` object, so
-/// the parsing/merging/writing primitives are `HooksInstaller`'s; what differs:
-///  - the event list (Codex has `Interrupt` and `PostCompact`, no `Notification`);
+/// the parse/write primitives are `HooksInstaller`'s. What is Codex-specific:
+///  - the event set (`events`) is SMALL on purpose. Mode A (the rollout, `CodexSessionStore`) already
+///    tells working / done precisely, so hooks add only what a rollout can't show: Codex waiting for the
+///    user's approval (`PermissionRequest` → red), context compaction (the chip), and a prompt reset of
+///    both when a turn stops or is interrupted. No per-tool `PreToolUse`/`PostToolUse`: Codex waits for a
+///    hook process on every tool call, and the rollout already says when the turn moved on
+///    (`CodexHookOverlay`). Fewer hooks is also fewer handlers for the user to approve;
 ///  - every command carries ` --agent codex`, so the hook process knows whose payload it reads;
-///  - TRUST: Codex refuses to run a hooks.json it hasn't reviewed (hash-bound, `hooks.state."<hash>"
-///    .trusted_hash` in config.toml). We never write that record ourselves — the user approves the file in
-///    the ChatGPT app (Codex settings → Hooks) or with `/hooks` in the CLI — but we DO report where things
-///    stand (`trustState`), and we touch hooks.json as rarely as possible because every change resets it.
+///  - TRUST: Codex skips a handler until the user approves it ("Review hooks" in the ChatGPT app, `/hooks`
+///    in the CLI). Trust is per handler and hash-bound (`CodexHookTrust`), so ANY change to one of our
+///    entries — even moving it to another index — asks for approval again. We therefore write hooks.json
+///    only on an explicit install / update / removal, and the self-heal touches nothing but a dangling
+///    binary path. We never write the trust record ourselves.
 ///
-/// Legacy entries: ChatGPT.app's "import Claude Code config" copies the user's Claude hooks verbatim into
-/// hooks.json — including OUR Claude-shaped `"…ccemaphore" --hook …` commands (no `--agent`). Those are
-/// ours too: install REPLACES them with the Codex-tagged form, uninstall removes them.
+/// Recognized as ours (replaced by install, removed by uninstall): the Codex-tagged commands of any
+/// version (`"…ccemaphore…" --hook <kw> --agent codex`), and the un-tagged Claude-shaped copies that
+/// ChatGPT.app's "import Claude Code config" writes into hooks.json.
 enum CodexHooksInstaller {
-    /// (Codex hook event, our `--hook` keyword, whether the event uses a tool matcher).
-    static let events: [(event: String, keyword: String, matcher: Bool)] = [
-        ("SessionStart", "start", false),
-        ("SessionEnd", "end", false),
-        ("UserPromptSubmit", "prompt", false),
-        // No `matcher` key for Codex: Claude's empty-string "match everything" convention is unverified
-        // there, and an absent matcher means "all tools" in both.
-        ("PreToolUse", "pre", false),
-        ("PostToolUse", "post", false),
-        ("Stop", "stop", false),
-        ("Interrupt", "interrupt", false),
-        ("PreCompact", "precompact", false),
-        ("PostCompact", "postcompact", false),
+    /// The hooks we install: (Codex event, our `--hook` keyword). `permission-request` routes to the
+    /// `PermissionBroker` (which never blocks for Codex — `mayBlock`); the rest to `HookHandler`.
+    static let events: [(event: String, keyword: String)] = [
+        ("PermissionRequest", "permission-request"),
+        ("Stop", "stop"),
+        ("Interrupt", "interrupt"),
+        ("PreCompact", "precompact"),
+        ("PostCompact", "postcompact"),
     ]
-    private static let basicKeywords = events.map(\.keyword)
+
+    /// Seconds Codex gives a hook before killing it. Our handlers return at once; Codex clamps
+    /// `Interrupt` to 3 s (and warns about a larger value), so it gets exactly that.
+    static func timeout(for event: String) -> Int { event == "Interrupt" ? 3 : 10 }
 
     /// Test seam: point at a throwaway file to exercise merge/uninstall without touching ~/.codex.
     static var hooksPath: String {
@@ -43,138 +46,157 @@ enum CodexHooksInstaller {
         return CodexPaths.configPath
     }
 
-    enum TrustState: Equatable, CustomStringConvertible {
-        /// No hooks.json (or nothing of ours in it) — nothing to trust yet.
-        case notInstalled
-        /// config.toml records a trust hash matching the CURRENT hooks.json bytes → Codex runs the hooks.
-        case trusted
-        /// config.toml has a hooks trust record, but not for these bytes: hooks.json changed since approval.
-        case stale
-        /// No hooks trust record at all: never reviewed in Codex.
-        case untrusted
+    // MARK: - Status
 
-        var description: String {
-            switch self {
-            case .notInstalled: return "not-installed"
-            case .trusted:      return "trusted"
-            case .stale:        return "stale (hooks.json changed since approval)"
-            case .untrusted:    return "untrusted (never reviewed in Codex)"
-            }
+    /// Install state + Codex's trust verdict for each of our handlers. Lenient: unreadable files read as
+    /// "nothing installed" / "no trust records".
+    static func status() -> CodexHooksStatus {
+        let root = readLenient()
+        let config = MiniTOML.flatten((try? String(contentsOfFile: configPath, encoding: .utf8)) ?? "")
+        return status(hooksRoot: root, hooksPath: keyPath(hooksPath), config: config)
+    }
+
+    /// The pure half of `status()`. `hooksPath` is the path Codex keys trust by (`keyPath`).
+    static func status(hooksRoot: [String: Any], hooksPath: String, config: [[String]: MiniTOML.Value]) -> CodexHooksStatus {
+        let install = installState(hooksRoot)
+        guard install != .none else { return .notInstalled }
+        let entries = CodexHookTrust.entries(hooksRoot: hooksRoot, hooksPath: hooksPath,
+                                             states: CodexHookTrust.states(in: config), isOurs: isOurCommand)
+        return CodexHooksStatus(install: install,
+                                featureEnabled: CodexHookTrust.hooksFeatureEnabled(in: config),
+                                entries: entries)
+    }
+
+    /// `current` iff every event of `events` holds exactly one entry of ours with its keyword, and nothing
+    /// else of ours exists anywhere (an older layout's extra events, an imported Claude-shaped copy).
+    static func installState(_ root: [String: Any]) -> CodexHooksStatus.Install {
+        guard let hooks = root["hooks"] as? [String: Any] else { return .none }
+        var ours: [(event: String, entry: [String: Any])] = []
+        for (event, value) in hooks {
+            for entry in (value as? [[String: Any]]) ?? [] where isOurs(entry) { ours.append((event, entry)) }
         }
-    }
-
-    // MARK: - Status (lenient)
-
-    /// Installed = our Codex-TAGGED entries are present. Imported Claude-shaped copies don't count: they
-    /// would mis-key Codex payloads as Claude sessions if Codex ever ran them, so they read as "off" until
-    /// `install()` replaces them.
-    static func isInstalled() -> Bool {
-        guard let hooks = readLenient()["hooks"] as? [String: Any] else { return false }
-        return events.contains { e in
-            (hooks[e.event] as? [[String: Any]])?.contains(where: isOurTaggedBasic) ?? false
+        guard !ours.isEmpty else { return .none }
+        guard ours.count == events.count else { return .outdated }
+        for e in events {
+            let matching = ours.filter { $0.event == e.event }
+            guard matching.count == 1,
+                  commands(matching[0].entry).contains(where: { $0.hasSuffix(" --hook \(e.keyword) --agent codex") })
+            else { return .outdated }
         }
+        return .current
     }
 
-    /// Un-tagged (imported) copies of our Claude hooks are present in hooks.json. Surfaced so the user
-    /// knows why the row reads "off" despite entries being there.
-    static func hasLegacyImports() -> Bool {
-        guard let hooks = readLenient()["hooks"] as? [String: Any] else { return false }
-        return hooks.values.contains { ($0 as? [[String: Any]])?.contains(where: HooksInstaller.isAnyOurs) ?? false }
-    }
-
-    static func isPermissionHookInstalled() -> Bool {
-        guard let hooks = readLenient()["hooks"] as? [String: Any],
-              let arr = hooks["PermissionRequest"] as? [[String: Any]] else { return false }
-        return arr.contains(where: isPermissionEntry)
-    }
-
-    /// Where Codex's hash-bound trust stands for the CURRENT hooks.json. Codex records
-    /// `hooks.state."<hash>".trusted_hash = "<hash>"` in config.toml when the user approves the file; the
-    /// hash is taken to be the SHA-256 of the file bytes — a HYPOTHESIS until verified against a real
-    /// approval. If it is wrong, a trusted file reads as `.stale`; that state's caption therefore says only
-    /// "no approval on record for the current file — review it in Codex", never "the file changed".
-    static func trustState() -> TrustState {
-        guard isInstalled() || isPermissionHookInstalled(),
-              let bytes = FileManager.default.contents(atPath: hooksPath) else { return .notInstalled }
-        guard let config = try? String(contentsOfFile: configPath, encoding: .utf8) else { return .untrusted }
-        let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
-        if config.contains(sha) { return .trusted }
-        return config.contains("trusted_hash") ? .stale : .untrusted
+    /// Codex keys trust by the PHYSICAL hooks.json path (it canonicalizes CODEX_HOME).
+    static func keyPath(_ path: String) -> String {
+        let dir = (path as NSString).deletingLastPathComponent
+        guard let r = realpath(dir, nil) else { return path }
+        defer { free(r) }
+        return (String(cString: r) as NSString).appendingPathComponent((path as NSString).lastPathComponent)
     }
 
     // MARK: - Install / uninstall (strict)
 
+    /// Install (or update to) the current set. A file already holding exactly that set for this binary is
+    /// left untouched — rewriting it would re-key nothing but still bump Codex's file watcher.
     static func install() throws {
-        var root = try HooksInstaller.loadStrict(path: hooksPath)
-        var hooks = try HooksInstaller.hooksObject(root, file: hooksFileName)
-        let exe = HooksInstaller.executablePath
-        for e in events {
-            var arr = try HooksInstaller.eventArray(hooks, e.event, file: hooksFileName)
-            arr.removeAll(where: isOurBasic)                  // idempotent; incl. imported Claude-shaped ones
-            arr.append(HooksInstaller.entry(keyword: e.keyword, matcher: e.matcher, exe: exe, agent: .codex))
-            hooks[e.event] = arr
+        let before = try HooksInstaller.loadStrict(path: hooksPath)
+        let after = try merged(before, exe: HooksInstaller.executablePath)
+        guard !HooksInstaller.nsEqual(before, after) else {
+            Log.codex.info("codex hooks already current in \(hooksPath) → left untouched")
+            return
         }
-        // The import also brings Claude-only events we never register for Codex (`Notification`) and a
-        // Claude-shaped PermissionRequest; drop OUR entries there so no un-tagged command lingers.
-        for event in ["Notification", "SubagentStart", "SubagentStop", "PermissionRequest"] {
-            guard var arr = hooks[event] as? [[String: Any]] else { continue }
-            arr.removeAll(where: HooksInstaller.isAnyOurs)
-            if arr.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = arr }
-        }
-        root["hooks"] = hooks
-        try HooksInstaller.write(root, to: hooksPath)
-        Log.codex.info("installed codex hooks → \(hooksPath) (exe=\(exe)); Codex must now trust the file")
+        try HooksInstaller.write(after, to: hooksPath)
+        Log.codex.info("installed codex hooks → \(hooksPath) (exe=\(HooksInstaller.executablePath)); Codex must now approve them")
+        logShiftedForeignHooks(before: before, after: after)
     }
 
-    static func installPermissionHook() throws {
-        var root = try HooksInstaller.loadStrict(path: hooksPath)
-        var hooks = try HooksInstaller.hooksObject(root, file: hooksFileName)
-        var arr = try HooksInstaller.eventArray(hooks, "PermissionRequest", file: hooksFileName)
-        arr.removeAll(where: { isPermissionEntry($0) || HooksInstaller.isAnyOurs($0) })
-        arr.append(HooksInstaller.permissionEntry(exe: HooksInstaller.executablePath, agent: .codex))
-        hooks["PermissionRequest"] = arr
-        root["hooks"] = hooks
-        try HooksInstaller.write(root, to: hooksPath)
-        Log.codex.info("installed codex PermissionRequest hook → \(hooksPath)")
-    }
-
-    static func uninstallPermissionHook() throws {
-        var root = try HooksInstaller.loadStrict(path: hooksPath)
-        guard var hooks = root["hooks"] as? [String: Any],
-              var arr = hooks["PermissionRequest"] as? [[String: Any]] else { return }
-        arr.removeAll(where: isPermissionEntry)
-        if arr.isEmpty { hooks.removeValue(forKey: "PermissionRequest") } else { hooks["PermissionRequest"] = arr }
-        if hooks.isEmpty { root.removeValue(forKey: "hooks") } else { root["hooks"] = hooks }
-        try HooksInstaller.write(root, to: hooksPath)
-        Log.codex.info("removed codex PermissionRequest hook → \(hooksPath)")
-    }
-
-    /// Remove everything of ours (Codex-tagged AND imported Claude-shaped). No-write when nothing changes;
-    /// an absent file is never materialized.
+    /// Remove everything of ours. No write when nothing changes; an absent file is never materialized.
     static func uninstall() throws {
         let before = try HooksInstaller.loadStrict(path: hooksPath)
-        var root = before
-        if var hooks = root["hooks"] as? [String: Any] {
-            for (event, value) in hooks {
-                guard var arr = value as? [[String: Any]] else { continue }
-                arr.removeAll(where: { isAnyOurs($0) || HooksInstaller.isAnyOurs($0) })
-                if arr.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = arr }
-            }
-            if hooks.isEmpty { root.removeValue(forKey: "hooks") } else { root["hooks"] = hooks }
-        }
-        guard !HooksInstaller.nsEqual(before, root) else {
+        let after = removed(before)
+        guard !HooksInstaller.nsEqual(before, after) else {
             Log.codex.info("codex uninstall: nothing of ours in \(hooksPath) → left untouched")
             return
         }
-        try HooksInstaller.write(root, to: hooksPath)
+        try HooksInstaller.write(after, to: hooksPath)
         Log.codex.info("uninstalled codex hooks → \(hooksPath)")
+        logShiftedForeignHooks(before: before, after: after)
     }
 
-    /// Refresh-only self-heal, like `HooksInstaller.healInstalled` — but every byte changed in hooks.json
-    /// invalidates Codex's hash-bound trust, so this is deliberately NARROWER than the Claude one: an
-    /// entry is re-pointed at THIS binary only when the binary it names is GONE (a deleted DerivedData
-    /// build, an app that moved). Two coexisting builds (Xcode's and /Applications') never churn a
-    /// trusted file: whichever one the entries name keeps running, and both read the same status files.
+    /// The pure half of `install`. On an event of the current set our entry is rewritten IN PLACE (its
+    /// first entry of ours keeps its index; a first install appends), so every foreign group keeps its
+    /// index — and with it Codex's trust, which is keyed by index. Our extra entries, and ours on events
+    /// the current set no longer uses (an older layout, imported Claude-shaped copies), are dropped;
+    /// a foreign group AFTER one of those does move up, and Codex asks to approve it again — unavoidable
+    /// short of leaving placeholder groups in the user's file (`logShiftedForeignHooks` names them).
+    static func merged(_ root: [String: Any], exe: String) throws -> [String: Any] {
+        var hooks = try HooksInstaller.hooksObject(root, file: hooksFileName)
+        let current = Dictionary(uniqueKeysWithValues: events.map { ($0.event, $0.keyword) })
+        for event in Set(hooks.keys).union(current.keys) {
+            var arr = try HooksInstaller.eventArray(hooks, event, file: hooksFileName)
+            if let keyword = current[event] {
+                let desired = entry(event: event, keyword: keyword, exe: exe)
+                if let first = arr.firstIndex(where: isOurs) {
+                    arr[first] = desired
+                    arr = arr.enumerated().filter { $0.offset == first || !isOurs($0.element) }.map(\.element)
+                } else {
+                    arr.append(desired)
+                }
+            } else {
+                arr.removeAll(where: isOurs)
+            }
+            if arr.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = arr }
+        }
+        var out = root
+        out["hooks"] = hooks
+        return out
+    }
+
+    /// Events whose foreign hooks changed index between two versions of the file — each of them will be
+    /// "new" to Codex (trust is keyed by index) and need approving again. For the log.
+    static func shiftedForeignEvents(before: [String: Any], after: [String: Any]) -> [String] {
+        func foreign(_ root: [String: Any]) -> [String: [Int]] {
+            let hooks = root["hooks"] as? [String: Any] ?? [:]
+            return hooks.mapValues { value in
+                ((value as? [[String: Any]]) ?? []).enumerated().filter { !isOurs($0.element) }.map(\.offset)
+            }.filter { !$0.value.isEmpty }
+        }
+        let a = foreign(before), b = foreign(after)
+        return a.keys.filter { a[$0] != b[$0] }.sorted()
+    }
+
+    private static func logShiftedForeignHooks(before: [String: Any], after: [String: Any]) {
+        let shifted = shiftedForeignEvents(before: before, after: after)
+        guard !shifted.isEmpty else { return }
+        Log.codex.warn("removing our entries moved the user's own hooks on \(shifted.joined(separator: ", ")) — Codex will ask to approve those again")
+    }
+
+    /// The pure half of `uninstall`. Empty event arrays and an empty `hooks` object are dropped.
+    static func removed(_ root: [String: Any]) -> [String: Any] {
+        var out = root
+        guard var hooks = out["hooks"] as? [String: Any] else { return out }
+        for (event, value) in hooks {
+            guard var arr = value as? [[String: Any]] else { continue }
+            arr.removeAll(where: isOurs)
+            if arr.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = arr }
+        }
+        if hooks.isEmpty { out.removeValue(forKey: "hooks") } else { out["hooks"] = hooks }
+        return out
+    }
+
+    static func entry(event: String, keyword: String, exe: String) -> [String: Any] {
+        ["hooks": [[
+            "type": "command",
+            "command": HooksInstaller.command(keyword: keyword, exe: exe, agent: .codex),
+            "timeout": timeout(for: event),
+        ]]]
+    }
+
+    /// Refresh-only self-heal, deliberately NARROWER than Claude's (`HooksInstaller.healInstalled`): every
+    /// changed byte of one of our entries costs the user a fresh approval in Codex, so an entry is
+    /// re-pointed at THIS binary only when the binary it names is GONE (a deleted DerivedData build, an
+    /// app that moved). Two coexisting builds (Xcode's and /Applications') never churn a trusted file:
+    /// whichever one the entries name keeps running, and both read the same status files.
     static func healInstalled() throws {
         var root = try HooksInstaller.loadStrict(path: hooksPath)
         guard var hooks = root["hooks"] as? [String: Any] else { return }
@@ -182,25 +204,20 @@ enum CodexHooksInstaller {
         var changed = false
         for e in events {
             guard var arr = hooks[e.event] as? [[String: Any]] else { continue }
-            let desired = HooksInstaller.entry(keyword: e.keyword, matcher: e.matcher, exe: exe, agent: .codex)
+            let desired = entry(event: e.event, keyword: e.keyword, exe: exe)
             var touched = false
-            for i in arr.indices where isOurTaggedBasic(arr[i]) && isDangling(arr[i]) && !HooksInstaller.nsEqual(arr[i], desired) {
-                arr[i] = desired; touched = true
+            for i in arr.indices where isOurs(arr[i]) && isDangling(arr[i])
+                && commands(arr[i]).contains(where: { $0.hasSuffix(" --hook \(e.keyword) --agent codex") })
+                && !HooksInstaller.nsEqual(arr[i], desired) {
+                arr[i] = desired
+                touched = true
             }
             if touched { hooks[e.event] = arr; changed = true }
-        }
-        if var arr = hooks["PermissionRequest"] as? [[String: Any]] {
-            let desired = HooksInstaller.permissionEntry(exe: exe, agent: .codex)
-            var touched = false
-            for i in arr.indices where isPermissionEntry(arr[i]) && isDangling(arr[i]) && !HooksInstaller.nsEqual(arr[i], desired) {
-                arr[i] = desired; touched = true
-            }
-            if touched { hooks["PermissionRequest"] = arr; changed = true }
         }
         guard changed else { return }
         root["hooks"] = hooks
         try HooksInstaller.write(root, to: hooksPath)
-        Log.codex.warn("self-healed codex hook commands whose binary was gone → \(exe); hooks.json changed, so Codex will ask to trust it again")
+        Log.codex.warn("self-healed codex hook commands whose binary was gone → \(exe); Codex will ask to approve them again")
     }
 
     /// An entry whose command names a binary that no longer exists (or can't be parsed) — the only case
@@ -225,32 +242,22 @@ enum CodexHooksInstaller {
         return nil   // unterminated quote
     }
 
-    // MARK: - Ownership (structural + ccemaphore-anchored + `--agent codex`-tagged)
+    // MARK: - Ownership (structural + ccemaphore-anchored)
 
     private static func commands(_ entry: [String: Any]) -> [String] {
         (entry["hooks"] as? [[String: Any]])?.compactMap { $0["command"] as? String } ?? []
     }
 
-    /// Our Codex basic entry: `… --hook <kw> --agent codex`.
-    static func isOurTaggedBasic(_ entry: [String: Any]) -> Bool {
-        commands(entry).contains { cmd in
-            guard cmd.hasPrefix("\""), cmd.contains("ccemaphore") else { return false }
-            return basicKeywords.contains { cmd.hasSuffix(" --hook \($0) --agent codex") }
-        }
+    /// A Codex-tagged command of ours, from any version: `"<path with ccemaphore>" --hook <kw> --agent codex`.
+    /// The quoted-path + `ccemaphore` anchors keep a user's own command that merely mentions us safe.
+    static func isOurCommand(_ cmd: String) -> Bool {
+        cmd.hasPrefix("\"") && cmd.contains("ccemaphore") && cmd.contains(" --hook ") && cmd.hasSuffix(" --agent codex")
     }
 
-    /// Ours to replace/remove: the tagged entry OR an imported Claude-shaped one of ours (`… --hook <kw>`).
-    static func isOurBasic(_ entry: [String: Any]) -> Bool {
-        isOurTaggedBasic(entry) || HooksInstaller.isOurBasic(entry)
+    /// Ours to replace / remove: a Codex-tagged entry, or an imported Claude-shaped one of ours.
+    static func isOurs(_ entry: [String: Any]) -> Bool {
+        commands(entry).contains(where: isOurCommand) || HooksInstaller.isAnyOurs(entry)
     }
-
-    static func isPermissionEntry(_ entry: [String: Any]) -> Bool {
-        commands(entry).contains {
-            $0.hasPrefix("\"") && $0.contains("ccemaphore") && $0.hasSuffix(" --hook permission-request --agent codex")
-        }
-    }
-
-    static func isAnyOurs(_ entry: [String: Any]) -> Bool { isOurBasic(entry) || isPermissionEntry(entry) }
 
     private static func readLenient() -> [String: Any] {
         guard let data = FileManager.default.contents(atPath: hooksPath),

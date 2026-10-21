@@ -46,6 +46,50 @@ enum TailReader {
         }
     }
 
+    /// A resumable read of a file that is still being appended to (a Codex rollout, see
+    /// `CodexSessionStore.poll`): the complete lines from `offset` to EOF, `resumeAt` — the offset just past
+    /// the LAST newline, so a line the writer is still in the middle of is left for the next call instead of
+    /// being parsed half-written — and the file size seen. `offset == nil` starts `window` bytes before EOF
+    /// and drops the partial first line, with the same giant-line whole-file fallback as `tailLines`.
+    /// nil ⇒ unreadable, or the file is now SHORTER than `offset` (replaced/truncated — start over).
+    static func readResumable(path: String, from offset: UInt64?,
+                              window: UInt64 = defaultWindow) -> (lines: [String], resumeAt: UInt64, size: UInt64)? {
+        guard let h = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? h.close() }
+        do {
+            let size = try h.seekToEnd()
+            var start: UInt64
+            if let offset {
+                guard offset <= size else { return nil }
+                start = offset
+            } else {
+                start = size > window ? size - window : 0
+            }
+            if start == size { return ([], start, size) }
+            try h.seek(toOffset: start)
+            var data = (try h.readToEnd()) ?? Data()
+            var first = 0   // index of the first complete line in `data`
+            if offset == nil, start != 0 {
+                // The window must hold at least one COMPLETE line after the partial one it starts in;
+                // otherwise it sits inside one giant line (possibly the last one, newline-terminated) and
+                // only the whole file has a record to give.
+                if let nl = data.firstIndex(of: newline), let last = data.lastIndex(of: newline), last > nl {
+                    first = nl + 1
+                } else {
+                    try h.seek(toOffset: 0)
+                    data = (try h.readToEnd()) ?? Data()
+                    start = 0
+                }
+            }
+            guard let last = data.lastIndex(of: newline), last >= first else {
+                return ([], start + UInt64(first), size)
+            }
+            return (splitLines(data.subdata(in: first..<(last + 1))), start + UInt64(last + 1), size)
+        } catch {
+            return nil
+        }
+    }
+
     /// The byte-window → complete-lines transform, for a caller that already holds a tail-window `Data`
     /// (e.g. `RemoteTranscriptPoller`, whose bytes arrive over SSH from `tail -c`, not a local
     /// `FileHandle`). Same two safety rules as `tailLines`: when the window was seeked into the middle of

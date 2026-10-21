@@ -79,6 +79,10 @@ enum DS {
     static let primaryFill = dynamic(dark: .white.opacity(0.92), light: Color(hex: 0x1C1C1E))
     static let primaryText = dynamic(dark: Color(hex: 0x15151A), light: .white)
     static let denyHover   = dynamic(dark: Color(hex: 0xFF453A, alpha: 0.14), light: Color(hex: 0xFF3B30, alpha: 0.10))
+    /// The raised thumb of a segmented track (the Settings tab strip, on a `neutralBtn` track) — a lifted
+    /// graphite on dark, the white macOS thumb on light — and its soft drop shadow.
+    static let segmentThumb       = dynamic(dark: .white.opacity(0.15), light: .white)
+    static let segmentThumbShadow = dynamic(dark: .black.opacity(0.35), light: .black.opacity(0.12))
 
     /// Inset/empty lamp fill (a dark socket) — the unlit lamp in the tower.
     static let lampOff       = dynamic(dark: .white.opacity(0.045), light: .black.opacity(0.06))
@@ -99,6 +103,12 @@ enum DS {
     static let ring      = Animation.easeOut(duration: 1.6).repeatForever(autoreverses: false)
     static let ribbonExpand = Animation.timingCurve(0.2, 0.82, 0.25, 1, duration: 0.34)
     static let panelPop     = Animation.timingCurve(0.2, 0.85, 0.35, 1.1, duration: 0.22)
+    /// Settings: a page switch (tab or sub-screen) — a quick ease-out, the incoming page settling in place.
+    static let settingsPage = Animation.timingCurve(0.2, 0.85, 0.3, 1, duration: 0.28)
+    /// Settings: fades — the outgoing page, revealed rows, every move under Reduce Motion.
+    static let settingsFade = Animation.easeOut(duration: 0.16)
+    /// Settings: the tab strip's thumb gliding to the picked tab.
+    static let tabThumb     = Animation.spring(response: 0.32, dampingFraction: 0.82)
 
     // MARK: - Geometry at size = M (§2.6). Scale by the widget size factor (0.75 / 1.0 / 1.45).
 

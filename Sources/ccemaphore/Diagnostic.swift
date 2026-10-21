@@ -43,6 +43,12 @@ enum Diagnostic {
             "menubar.update.check", "settings.hooks.blockedTransient", "menubar.showLight",
             "update.available.downloaded.body", "update.ready.body.restart", "update.ready.body.waiting",
             "update.installing.waiting", "a11y.expanded",
+            "settings.section.claude", "settings.codex.hooks.title", "settings.codex.hooks.subtitle",
+            "settings.codex.trust.title", "settings.codex.trust.silent", "settings.codex.trust.modified",
+            "settings.codex.trust.featureOff", "settings.codex.trust.outdated", "settings.codex.action.update",
+            "settings.codex.action.update.subtitle", "settings.codex.action.openApp",
+            "settings.tab.appearance", "settings.tab.notifications", "settings.tab.agents", "settings.tab.ssh",
+            "settings.tab.general", "settings.chats.section", "settings.trusted.off", "remote.explainer",
         ]
         defer { Loc.setOverride(nil) }
         for code in Loc.supported {
@@ -51,6 +57,7 @@ enum Diagnostic {
             print("\n=== \(code)\(missing ? "   [!! strings NOT found in bundle]" : "") ===")
             for k in sampleKeys { print("  \(k) = \(L(k))") }
             print("  count.working(3) = \(Lf("count.working", 3))")
+            print("  settings.registry.live(4) = \(Lf("settings.registry.live", 4))   back.a11y = \(Lf("settings.back.a11y", L("settings.tab.agents")))")
             print("  update.available.title(1.3.1) = \(Lf("update.available.title", "1.3.1"))   menubar.update.restart(1.3.1) = \(Lf("menubar.update.restart", "1.3.1"))")
             print("  settings.updates.lastCheck(-2h) = \(Lf("settings.updates.lastCheck", Fmt.relative(Date().addingTimeInterval(-2 * 3600))))"
                   + "   (now) = \(Lf("settings.updates.lastCheck", Fmt.relative(Date())))")
@@ -61,9 +68,20 @@ enum Diagnostic {
             for n in [1, 2, 5, 21, 22] {
                 print("  chats(\(n)) = \(Lcount("noun.chats", n))   days(\(n)) = \(Lcount("noun.days", n))   retention=\(Lcount("noun.daysShort", n))   subagents=\(Lcount("noun.subagents", n))")
             }
+            print("  codex.trust.pending(5) = \(Lf("settings.codex.trust.pending", Lcount("noun.hooks", 5)))"
+                  + "   disabled(1) = \(Lf("settings.codex.trust.disabled", Lcount("noun.hooks", 1)))"
+                  + "   working(-3m) = \(Lf("settings.codex.trust.working", Fmt.relative(Date().addingTimeInterval(-180))))")
+            print("  activity: \([AgentAction.read("SKILL.md"), .edit("Flow.dart +2"), .search("generate"), .list("lib/"), .open("openrouter.ai"), .webSearch("swift actors"), .view("shot.png"), .delegate("Review diff"), .command("rg -n x")].map(\.text).joined(separator: " | "))")
+            print("  hooks(1/2/5/21/22) = \([1, 2, 5, 21, 22].map { Lcount("noun.hooks", $0) }.joined(separator: ", "))")
             print("  dayFull(2026-06-30) = \(Fmt.dayFull("2026-06-30"))")
             print("  resetIn(+4h19m) = \(Fmt.resetIn(Date().addingTimeInterval(4 * 3600 + 19 * 60)))")
         }
+    }
+
+    /// One sub-agent row as the panel shows it (headline · who — detail), for `--scan` / `--codex-scan`.
+    static func childLine(_ c: ChildAgent, now: Date) -> String {
+        "           └ \(c.state.rawValue) \(c.headline)\(c.who.map { " · \($0)" } ?? "")"
+            + "  age=\(Int(now.timeIntervalSince(c.lastActivity)))s\(c.detail.map { "\n               \($0)" } ?? "")"
     }
 
     /// `ccemaphore --check-perm` — read a PreToolUse-shaped JSON payload from stdin and print whether
@@ -180,6 +198,7 @@ enum Diagnostic {
             let kids = s.children.isEmpty ? "" : "  children=\(s.children.count)(\(s.children.filter { $0.state == .working }.count) working)"
             print("  [\(label.padding(toLength: 7, withPad: " ", startingAt: 0))] "
                   + "\(s.displayName)  age=\(age)s  id=\(s.id.prefix(8))\(tok)\(reg)\(kids)")
+            for c in s.children { print(childLine(c, now: now)) }
         }
         let unseen = registry.values.filter { e in !sessions.contains { $0.id == e.sessionId } && !e.isHidden }
         if !unseen.isEmpty {

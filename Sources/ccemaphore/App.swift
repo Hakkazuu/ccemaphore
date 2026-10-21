@@ -64,6 +64,15 @@ enum Entry {
             Task { await CodexDiagnostic.scan(); exit(0) }
             dispatchMain()
         }
+        if let i = args.firstIndex(of: "--self-test") {
+            let filter = i + 1 < args.count && !args[i + 1].hasPrefix("--") ? args[i + 1] : nil
+            exit(SelfTest.run(filter: filter))
+        }
+        if let i = args.firstIndex(of: "--codex-watch") {
+            let seconds = (i + 1 < args.count ? TimeInterval(args[i + 1]) : nil) ?? 60
+            Task { await CodexDiagnostic.watch(seconds: seconds); exit(0) }
+            dispatchMain()
+        }
         if let i = args.firstIndex(of: "--codex-probe"), i + 1 < args.count {
             CodexDiagnostic.probe(args[i + 1])
             return
@@ -99,7 +108,7 @@ enum Entry {
             refuseHookInstallFromTransientLocation("--install-codex-hooks")
             do { try CodexHooksInstaller.install(); print("codex hooks installed → \(CodexHooksInstaller.hooksPath)") }
             catch { print("install failed: \(error.localizedDescription)") }
-            print("trust: \(CodexHooksInstaller.trustState())")
+            CodexDiagnostic.hooksStatus()
             return
         }
         if args.contains("--uninstall-codex-hooks") {
@@ -108,8 +117,7 @@ enum Entry {
             return
         }
         if args.contains("--codex-hooks-status") {
-            print("installed: \(CodexHooksInstaller.isInstalled())  permission: \(CodexHooksInstaller.isPermissionHookInstalled())  "
-                  + "trust: \(CodexHooksInstaller.trustState())  (\(CodexHooksInstaller.hooksPath))")
+            CodexDiagnostic.hooksStatus()
             return
         }
         if args.contains("--ax-dump") {
@@ -264,6 +272,9 @@ enum Entry {
           ccemaphore --codex-scan    One-shot pass over Codex's ~/.codex (catalog + rollouts), then exit.
           ccemaphore --codex-probe <rollout.jsonl>
                                      Per-stage result for one Codex rollout transcript.
+          ccemaphore --codex-watch [seconds]
+                                     Track Codex sessions live the way the app does (default 60 s);
+                                     print every state change, then exit.
           ccemaphore --check-perm    Read a PreToolUse JSON payload from stdin; print whether the
                                      permission broker would skip it (Claude auto-resolves → no banner).
           ccemaphore --perm-diag     Print the raw payload last captured for each permission hook event
@@ -278,6 +289,8 @@ enum Entry {
                                      scan; with a toolUseId, report whether its dispatch marker is present.
           ccemaphore --ax-dump       Probe the frontmost Cursor window's Accessibility tree.
           ccemaphore --l10n-check    Print localized samples for every language (verify localization).
+          ccemaphore --self-test [filter]
+                                     Run the built-in unit tests (temp files only); exit 1 on a failure.
           ccemaphore --logs-path     Print the log directory (~/Library/Logs/ccemaphore).
           ccemaphore --logs-tail     Print the tail of today's log file.
 
@@ -288,9 +301,11 @@ enum Entry {
 
         Codex hooks (edit ~/.codex/hooks.json; Codex must then TRUST the file — review it in the
         ChatGPT app's Codex settings or with /hooks in the Codex CLI):
-          ccemaphore --install-codex-hooks     Install the Codex status + permission hooks.
+          ccemaphore --install-codex-hooks     Install (or update) the Codex hooks: approval → red light,
+                                               compaction chip.
           ccemaphore --uninstall-codex-hooks   Remove everything ccemaphore added to hooks.json.
-          ccemaphore --codex-hooks-status      Report install + trust state.
+          ccemaphore --codex-hooks-status      Install state + Codex's trust verdict per hook (key, hash,
+                                               recorded hash) + when a Codex hook last fired.
           ccemaphore --codex-db-probe          Low-level SQLite open/prepare probe of the Codex catalog.
 
         Remote hosts (SSH — configured from the in-app "Remote Hosts" section; <host> is an id or label):

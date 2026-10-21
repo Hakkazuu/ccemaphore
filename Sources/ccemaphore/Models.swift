@@ -7,6 +7,10 @@ enum Tuning {
     static let activeWindow: TimeInterval = 60       // recency for "working"
     static let staleWindow: TimeInterval = 30 * 60   // drop from the traffic light entirely
     static let stateTick: TimeInterval = 5           // re-derive states as windows elapse
+    /// Codex rollout growth poll (`CodexSessionStore.poll`) — FSEvents is silent while Codex holds a
+    /// rollout open, so this is how a Codex turn's start / end reaches the light. One `stat` per tracked
+    /// thread, so it can run much faster than `stateTick`.
+    static let codexPoll: TimeInterval = 1.5
     static let usageRefresh: TimeInterval = 45       // ccusage cadence (expensive — keep slow)
     /// Keep a parent chat "working" this long after its last sub-agent / workflow transcript write.
     /// Wider than `activeWindow` because sub-agents (and workflow fan-outs) go silent mid-task between
@@ -114,11 +118,30 @@ enum WaitingKind: String, Sendable {
 struct ChildAgent: Identifiable, Sendable, Equatable {
     enum Kind: String, Sendable { case subagent, workflow, codexSubagent }
     let id: String
+    /// Fallback label when nothing better is known (a short id; a Codex nickname).
     let name: String
     let kind: Kind
     var state: SessionState
     var lastActivity: Date
+    /// The task as given (Claude: the first line of the Task prompt). Codex encrypts sub-agent tasks.
     var title: String? = nil
+    /// What it's for, in a few words: Claude's Task `description`, a Codex sub-agent's task name.
+    var purpose: String? = nil
+    /// Who: Claude's agent type (Explore, a custom agent), a Codex sub-agent's nickname.
+    var who: String? = nil
+    /// Its latest tool call / command.
+    var activity: AgentAction? = nil
+
+    /// The row's headline — the same order for every agent: purpose, else the task, else the name.
+    var headline: String { purpose ?? title ?? name }
+
+    /// The row's second line: what it's doing while it works; otherwise the task's first line, unless the
+    /// headline already is it. Rendered on every body pass (`AgentAction.text` localizes).
+    var detail: String? {
+        if state == .working, let activity { return activity.text }
+        guard let title, !title.isEmpty, title != headline else { return nil }
+        return title
+    }
 }
 
 /// Account-level usage limits as the agent itself reports them (Codex writes `rate_limits` into every

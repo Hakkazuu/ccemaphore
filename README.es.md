@@ -59,10 +59,12 @@ solo color — para que nunca cambies de ventana solo para comprobar el estado.
   host (app de Claude, IDE, Terminal, app de ChatGPT). **Abrir chat** —o un clic en la fila del chat en
   el panel— abre el lugar correcto: una pestaña de Cursor, la sesión de la app de Claude o el hilo de
   Codex.
-- **Subagentes.** Un chat que lanzó subagentes (agentes `Task` de Claude, workflows, hilos hijos de Codex)
-  muestra un chevrón: despliégalo para ver qué hace cada uno.
+- **Subagentes.** Un chat que lanzó subagentes (agentes `Task` de Claude, workflows, hilos hijos de
+  Codex) muestra un chevrón. Al desplegarlo, cada subagente se ve igual en ambos agentes: para qué está
+  (la descripción de la tarea en Claude, el nombre de la tarea en Codex), quién es (el tipo de agente, el
+  apodo en Codex) y, mientras trabaja, qué hace ahora mismo: qué archivo lee, qué comando ejecuta.
 - **Agrupar por producto.** ¿Trabajas a la vez en el backend, el frontend y la landing de un producto?
-  Elige **Por producto** en **Ajustes ▸ Grupos de producto**: la pestaña Chats agrupa entonces los chats
+  Elige **Por producto** en **Ajustes ▸ Aspecto** (las carpetas están un nivel más abajo, en **Grupos de producto**): la pestaña Chats agrupa entonces los chats
   por carpeta de producto (`producto › subrepositorio`); los proyectos de la app de ChatGPT y las carpetas
   con varios repos se sugieren automáticamente.
 - **Límites de Codex.** Las ventanas de uso de 5 horas / semana que informa Codex, al final de la pestaña
@@ -77,7 +79,7 @@ Codex (ccusage ≥ 20), con desglose y filtro Claude / Codex en la ventana de hi
 ## Idiomas
 
 ccemaphore viene totalmente localizado en **English, Русский, Español, Deutsch, Français**, con cambio
-**en vivo** — sin reiniciar. Abre **Ajustes ▸ Idioma** y elige uno del menú (cada uno muestra su propio
+**en vivo** — sin reiniciar. Abre **Ajustes ▸ General ▸ Idioma** y elige uno del menú (cada uno muestra su propio
 nombre y bandera); toda la interfaz se vuelve a dibujar al instante. Déjalo en **Sistema** para seguir
 los idiomas preferidos de macOS (con retroceso al inglés).
 
@@ -94,13 +96,13 @@ Solo esto sale a la red:
 
 - **Comprobación de actualizaciones → GitHub.** Salvo que desactives las actualizaciones, ccemaphore
   pregunta a GitHub una vez al día si hay una versión nueva y la descarga de allí. GitHub ve tu dirección
-  IP, la versión de la app (en el User-Agent, p. ej. `ccemaphore/1.3.0 Sparkle/2.10.0`) y tu idioma
+  IP, la versión de la app (en el User-Agent, p. ej. `ccemaphore/1.3.1 Sparkle/2.10.0`) y tu idioma
   preferido (la cabecera `Accept-Language` que añade macOS). Cada comprobación incrementa además el
   contador público de descargas del `appcast.xml` de la versión: un único número agregado que cualquiera
   puede ver y que no te identifica. No se guardan cookies ni se envía ningún perfil del sistema.
 - **Tú decides.** En el primer inicio el panel pregunta cómo actualizar —automáticamente, solo avisar o
   desactivado— y no se hace ninguna comprobación automática hasta que respondas. Cámbialo cuando
-  quieras en **Ajustes ▸ Actualizaciones**; con las actualizaciones desactivadas, ccemaphore nunca
+  quieras en **Ajustes ▸ General ▸ Actualizaciones**; con las actualizaciones desactivadas, ccemaphore nunca
   comprueba por su cuenta (puedes seguir comprobando a mano).
 - **ccusage** (estadísticas de tokens y coste, solo si tienes Node o Bun) se ejecuta vía `bunx`/`npx`, que
   pueden descargar el paquete del registro de npm; el propio ccusage puede descargar los precios actuales
@@ -159,16 +161,22 @@ reversible.
 
 Si existe `~/.codex`, ccemaphore también vigila Codex: las transcripciones de los hilos
 (`~/.codex/sessions/**/rollout-*.jsonl` — `task_started` / `task_complete` / `turn_aborted` dan
-trabajando / hecho), el catálogo de hilos (`state_5.sqlite`, abierto en solo lectura: títulos, carpetas,
-proyectos, estado de archivo) y los bloqueos de escritura de cada hilo (los mantiene la app de ChatGPT
-mientras el hilo está abierto). Codex no escribe las solicitudes de aprobación en sus transcripciones, así
-que el «te necesita» de Codex solo llega con hooks: **Estado preciso mediante hooks de Codex** escribe los
-hooks de ccemaphore en `~/.codex/hooks.json`, y el interruptor aparte **Solicitudes de permiso de Codex**
-convierte una solicitud de aprobación en luz roja + cinta (los comandos de confianza se aprueban solos).
-Codex solo ejecuta hooks en los que **confía**: tras instalarlos, aprueba `hooks.json` una vez en la app
-de ChatGPT (ajustes de Codex → Hooks) o con `/hooks` en la CLI de Codex; la fila de Ajustes te indica en
-qué punto está. Un hilo que la app de ChatGPT *importó* de Claude Code conserva su insignia de Claude; un
-espejo puro sin turnos de Codex se oculta para no listar nada dos veces.
+trabajando / hecho; mientras un hilo trabaja, Codex mantiene abierta su transcripción, así que ccemaphore
+revisa las abiertas en busca de líneas nuevas cada 1,5 s), el catálogo de hilos (`state_5.sqlite`,
+abierto en solo lectura: títulos, carpetas, proyectos, estado de archivo) y los bloqueos de escritura de
+cada hilo (los mantiene la app de ChatGPT mientras el hilo está abierto). Codex no escribe las
+solicitudes de aprobación en sus transcripciones, así que el «te necesita» de Codex llega con hooks:
+**Detección precisa del estado** en la sección **Codex** añade cinco pequeños hooks a
+`~/.codex/hooks.json`: luz roja mientras Codex espera tu aprobación (también en un subagente: su chat se
+pone en rojo; no con la revisión automática de Codex, donde no se pregunta a nadie, y tras aprobar un
+comando largo, hasta que termina), el aviso de compactación y un reinicio cuando se detiene un turno;
+trabajando / hecho sigue saliendo de las transcripciones. Codex ejecuta un hook solo después de que lo
+**apruebes**: abre un chat de Codex y pulsa **Revisar hooks** en el cuadro de mensaje (o ejecuta `/hooks`
+en la CLI de Codex). La fila de Ajustes muestra el estado —pendientes de aprobación, aprobados, cuándo se
+ejecutó un hook por última vez— y te abre la app de ChatGPT. Los comandos de tu lista de confianza
+también se aprueban aquí sin preguntar. Tus propios hooks de `hooks.json` se conservan. Un hilo que la
+app de ChatGPT *importó* de Claude Code conserva su insignia de Claude; un espejo puro sin turnos de
+Codex se oculta para no listar nada dos veces.
 
 ## Instalación
 
@@ -187,12 +195,11 @@ espejo puro sin turnos de Codex se oculta para no listar nada dos veces.
   lugar de abrir otra.
 - **Elige cómo se actualiza ccemaphore**: el panel lo pregunta una vez —automáticamente, solo avisar o
   desactivado— ([detalles ↓](#actualizaciones)).
-- **Activa «Detección precisa del estado»** en Ajustes para habilitar el Modo B (hooks + la cinta de
-  permisos).
-- **¿Usas Codex en la app de ChatGPT?** Se detecta automáticamente. Para ver «hecho» y «te necesita» al
-  instante, activa **Estado preciso mediante hooks de Codex** (y **Solicitudes de permiso de Codex**) y
-  aprueba los hooks una vez en los ajustes de Codex de la app de ChatGPT; la fila muestra cuándo son de
-  confianza.
+- **Activa «Detección precisa del estado»** en **Ajustes ▸ Agentes ▸ Claude Code** para habilitar el Modo B (hooks
+  + la cinta de permisos).
+- **¿Usas Codex en la app de ChatGPT?** Se detecta automáticamente. Para ver cuándo Codex espera tu
+  aprobación, activa **Detección precisa del estado** en **Ajustes ▸ Agentes ▸ Codex** y pulsa una vez
+  **Revisar hooks** en el cuadro de mensaje de un chat de Codex; la fila muestra cuándo están aprobados.
 - **Ambas apps ya te avisan por su cuenta.** Si te basta con el semáforo, silencia la app de Claude / la
   app de ChatGPT en Ajustes del Sistema ▸ Notificaciones o en los ajustes de notificaciones de cada app.
 - **Para las estadísticas de tokens y coste**, asegúrate de tener Node o Bun en tu `PATH` — ccemaphore
@@ -208,7 +215,7 @@ espejo puro sin turnos de Codex se oculta para no listar nada dos veces.
 
 ccemaphore se mantiene al día solo, con [Sparkle](https://sparkle-project.org):
 
-- **Tres modos**, que eliges una vez en el primer inicio y puedes cambiar en **Ajustes ▸ Actualizaciones**
+- **Tres modos**, que eliges una vez en el primer inicio y puedes cambiar en **Ajustes ▸ General ▸ Actualizaciones**
   (donde también ves tu versión y la última comprobación):
   - **Automático**: comprueba una vez al día y descarga en segundo plano; cuando la nueva versión
     está lista, un solo clic en **Reiniciar** la instala y vuelve a abrir la app. Salir de la app de forma
@@ -277,7 +284,7 @@ Gracias a todos los que contribuyeron con funcionalidades a ccemaphore:
 
 Las actualizaciones dentro de la app funcionan con [Sparkle](https://sparkle-project.org) (licencia MIT).
 Su licencia, junto con los avisos del código que incluye, va dentro de la app (se abre desde
-**Ajustes ▸ Actualizaciones**) y en [`Resources/ThirdPartyNotices.txt`](Resources/ThirdPartyNotices.txt).
+**Ajustes ▸ General ▸ Actualizaciones**) y en [`Resources/ThirdPartyNotices.txt`](Resources/ThirdPartyNotices.txt).
 
 ## Licencia
 

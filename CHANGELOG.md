@@ -5,6 +5,47 @@ All notable changes to **ccemaphore** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-10-21
+
+### Fixed
+- **Codex chats showed the wrong light for minutes.** Codex keeps a running chat's transcript open, and
+  macOS reports no changes to an open file — so a chat that was working could sit green and a finished
+  one yellow. ccemaphore now checks the open Codex transcripts for new lines every 1.5 s and reads only
+  what was added, so the start and the end of every turn reach the light within a couple of seconds.
+- **A long Codex turn no longer flips to "done" mid-turn** while it waits on sub-agents or a slow command.
+- **Sub-agents no longer look busy forever** (a Codex sub-agent's transcript carries a copy of its
+  parent's still-running turn).
+- **Codex's background safety reviews** no longer flash as a separate working chat.
+
+### Added
+- **Red light when Codex waits for your approval** — including inside a sub-agent, where its chat turns
+  red. Turn on **Precise status detection** in Settings → Agents → Codex: it adds five small hooks to
+  `~/.codex/hooks.json` (approval, turn stop / interrupt, context compaction), then approve them once
+  with **Review hooks** in a Codex chat's message box. The red clears when Codex carries on — at once
+  after a denial, and when the command finishes after an approval (Codex records nothing in between).
+  Chats whose approvals go to Codex's auto-review never turn red: nobody is asked there.
+- **The Codex row tells you where the hooks stand** — waiting for approval (and how many), changed since
+  approval, switched off in Codex, or working with the time of the last signal — and opens the ChatGPT app
+  for you. Your own hooks in `hooks.json` are kept, and stay approved unless they come after one of
+  ccemaphore's entries that an update or removal drops.
+- **Sub-agent rows read the same for Claude and Codex**: what the sub-agent is for (Claude's task
+  description, Codex's task name), who it is (the agent type, Codex's nickname) and, while it works, what
+  it's doing right now — the file it reads, the command it runs. A Claude sub-agent shows as finished the
+  moment Claude Code marks it so.
+
+### Changed
+- **Settings redesigned as five tabs** instead of one long page of collapsible sections: **Appearance**
+  (the light and how the chat list is grouped), **Notifications**, **Agents** (Claude Code and Codex),
+  **SSH** and **General** (language, updates, logs). Long lists — product groups, trusted commands, the
+  add-host form — open one level down, with a back link. Trusted commands now sit right under the
+  permission switch they depend on, and the session-registry switch shows how many live sessions report
+  through it. Settings keep one height, so switching tabs never moves the panel, and they reopen on the
+  tab you used last.
+- **SSH remote hosts say what they cover:** Claude Code sessions only; Codex on remote machines isn't
+  supported yet.
+- **Codex hooks: one switch instead of two.** Hooks installed by 1.3.0 show "Update hooks"; updating
+  replaces them with the new, smaller set (Codex then asks to approve them again).
+
 ## [1.3.0] - 2026-10-12
 
 **The last manual install.** 1.3.0 is the first version that updates itself. Coming from 1.2.x or
@@ -148,6 +189,7 @@ Early patch releases following the initial launch. See the
     prompts, plus token/cost stats via `ccusage`.
 - Full localization: English, Русский, Español, Deutsch, Français.
 
+[1.3.1]: https://github.com/hakkazuu/ccemaphore/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/hakkazuu/ccemaphore/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/hakkazuu/ccemaphore/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/hakkazuu/ccemaphore/compare/v1.1.0...v1.2.0

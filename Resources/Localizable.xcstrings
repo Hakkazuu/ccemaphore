@@ -93,6 +93,286 @@
         }
       }
     },
+    "activity.delegate": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delegating: %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Поручает: %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delegiert: %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delega: %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Délègue : %@"
+          }
+        }
+      }
+    },
+    "activity.edit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Editing %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Правит %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bearbeitet %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edita %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modifie %@"
+          }
+        }
+      }
+    },
+    "activity.list": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listing %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Смотрит список %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listet %@ auf"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lista %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Liste %@"
+          }
+        }
+      }
+    },
+    "activity.open": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opening %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Открывает %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffnet %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abre %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ouvre %@"
+          }
+        }
+      }
+    },
+    "activity.read": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reading %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Читает %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Liest %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lee %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lit %@"
+          }
+        }
+      }
+    },
+    "activity.search": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Searching %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ищет %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sucht %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Busca %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cherche %@"
+          }
+        }
+      }
+    },
+    "activity.view": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Viewing %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Смотрит %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Betrachtet %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mira %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Regarde %@"
+          }
+        }
+      }
+    },
+    "activity.webSearch": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Searching the web: %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ищет в сети: %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sucht im Web: %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Busca en la web: %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cherche sur le web : %@"
+          }
+        }
+      }
+    },
     "agent.claude.a11y": {
       "extractionState": "manual",
       "localizations": {
@@ -439,76 +719,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Вчера"
-          }
-        }
-      }
-    },
-    "diag.registry.subtitle": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Live Claude Code processes reporting their own state"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Живые процессы Claude Code, сообщающие своё состояние"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Procesos de Claude Code activos que informan su estado"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Laufende Claude-Code-Prozesse, die ihren Zustand melden"
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Processus Claude Code actifs signalant leur état"
-          }
-        }
-      }
-    },
-    "diag.registry.title": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Session registry"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Реестр сессий"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Registro de sesiones"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sitzungsregister"
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Registre de sessions"
           }
         }
       }
@@ -2403,41 +2613,6 @@
         }
       }
     },
-    "notif.section": {
-      "extractionState": "manual",
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "MITTEILUNGEN & TON"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "NOTIFICATIONS & SOUND"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "NOTIFICACIONES Y SONIDO"
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "NOTIFICATIONS ET SON"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "УВЕДОМЛЕНИЯ И ЗВУК"
-          }
-        }
-      }
-    },
     "notif.show": {
       "extractionState": "manual",
       "localizations": {
@@ -3042,6 +3217,92 @@
           "stringUnit": {
             "state": "translated",
             "value": "j"
+          }
+        }
+      }
+    },
+    "noun.hooks.few": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "хука"
+          }
+        }
+      }
+    },
+    "noun.hooks.many": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "хуков"
+          }
+        }
+      }
+    },
+    "noun.hooks.one": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "hook"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "хук"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hook"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "hook"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "hook"
+          }
+        }
+      }
+    },
+    "noun.hooks.other": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "hooks"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hooks"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "hooks"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "hooks"
           }
         }
       }
@@ -4067,31 +4328,31 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Überwache Claude-Code-Sitzungen auf anderen Rechnern per SSH und beantworte ihre Berechtigungsanfragen von hier aus."
+            "value": "Überwache Claude-Code-Sitzungen auf anderen Rechnern per SSH und beantworte ihre Berechtigungsanfragen von hier aus. Nur Claude Code – Codex auf entfernten Rechnern wird noch nicht unterstützt."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Monitor Claude Code sessions on other machines over SSH, and answer their permission prompts from here."
+            "value": "Monitor Claude Code sessions on other machines over SSH, and answer their permission prompts from here. Claude Code only — Codex on remote machines isn’t supported yet."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Supervisa sesiones de Claude Code en otras máquinas por SSH y responde sus solicitudes de permiso desde aquí."
+            "value": "Supervisa sesiones de Claude Code en otras máquinas por SSH y responde sus solicitudes de permiso desde aquí. Solo Claude Code: Codex en máquinas remotas aún no es compatible."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Surveillez les sessions Claude Code sur d'autres machines via SSH et répondez à leurs demandes d'autorisation ici."
+            "value": "Surveillez les sessions Claude Code sur d'autres machines via SSH et répondez à leurs demandes d'autorisation ici. Claude Code uniquement : Codex sur les machines distantes n’est pas encore pris en charge."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Следите за сессиями Claude Code на других машинах по SSH и отвечайте на их запросы разрешений прямо отсюда."
+            "value": "Следите за сессиями Claude Code на других машинах по SSH и отвечайте на их запросы разрешений прямо отсюда. Только Claude Code — Codex на удалённых машинах пока не поддерживается."
           }
         }
       }
@@ -4617,41 +4878,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Удалённые хосты не настроены"
-          }
-        }
-      }
-    },
-    "remote.menu.title": {
-      "extractionState": "manual",
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Remote-Hosts"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Remote Hosts"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hosts remotos"
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hôtes distants"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Удалённые хосты"
           }
         }
       }
@@ -5566,37 +5792,212 @@
         }
       }
     },
+    "settings.back.a11y": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zurück zu %@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back to %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Volver a %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retour à %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Назад: %@"
+          }
+        }
+      }
+    },
+    "settings.chats.section": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chatliste"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chat list"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lista de chats"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Liste des chats"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Список чатов"
+          }
+        }
+      }
+    },
+    "settings.codex.action.openApp": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open ChatGPT"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Открыть ChatGPT"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ChatGPT öffnen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abrir ChatGPT"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ouvrir ChatGPT"
+          }
+        }
+      }
+    },
+    "settings.codex.action.update": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update hooks"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Обновить хуки"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hooks aktualisieren"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Actualizar hooks"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mettre à jour les hooks"
+          }
+        }
+      }
+    },
+    "settings.codex.action.update.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rewrites ccemaphore’s entries in ~/.codex/hooks.json; your other hooks are kept."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Перезаписывает записи ccemaphore в ~/.codex/hooks.json; ваши остальные хуки сохраняются."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schreibt die Einträge von ccemaphore in ~/.codex/hooks.json neu; deine anderen Hooks bleiben erhalten."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reescribe las entradas de ccemaphore en ~/.codex/hooks.json; tus otros hooks se conservan."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Réécrit les entrées de ccemaphore dans ~/.codex/hooks.json ; vos autres hooks sont conservés."
+          }
+        }
+      }
+    },
     "settings.codex.hooks.subtitle": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Writes ccemaphore’s hooks to ~/.codex/hooks.json (start / stop / prompt / tool events)."
+            "value": "Red light when Codex is waiting for your approval (not when Codex’s auto-review decides), plus the context-compaction chip. Adds 5 hooks to ~/.codex/hooks.json — approve them once in Codex."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Записывает хуки ccemaphore в ~/.codex/hooks.json (события start / stop / prompt / tool)."
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Escribe los hooks de ccemaphore en ~/.codex/hooks.json (eventos start / stop / prompt / tool)."
+            "value": "Красный свет, когда Codex ждёт вашего подтверждения (но не когда решает автопроверка Codex), и значок сжатия контекста. Добавляет 5 хуков в ~/.codex/hooks.json — один раз одобрите их в Codex."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Schreibt die Hooks von ccemaphore nach ~/.codex/hooks.json (Start-/Stop-/Prompt-/Tool-Ereignisse)."
+            "value": "Rotes Licht, wenn Codex auf deine Freigabe wartet (nicht, wenn die automatische Prüfung von Codex entscheidet), dazu der Hinweis bei Kontextkomprimierung. Fügt 5 Hooks zu ~/.codex/hooks.json hinzu – gib sie einmal in Codex frei."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Luz roja cuando Codex espera tu aprobación (no cuando decide la revisión automática de Codex), además del aviso de compactación del contexto. Añade 5 hooks a ~/.codex/hooks.json; apruébalos una vez en Codex."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Écrit les hooks de ccemaphore dans ~/.codex/hooks.json (événements start / stop / prompt / tool)."
+            "value": "Feu rouge quand Codex attend votre approbation (pas quand la revue automatique de Codex décide), plus l’indicateur de compactage du contexte. Ajoute 5 hooks à ~/.codex/hooks.json — approuvez-les une fois dans Codex."
           }
         }
       }
@@ -5607,101 +6008,31 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Precise status via Codex hooks"
+            "value": "Precise status detection"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Точный статус через хуки Codex"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Estado preciso mediante hooks de Codex"
+            "value": "Точное определение статуса"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Präziser Status über Codex-Hooks"
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Statut précis via les hooks Codex"
-          }
-        }
-      }
-    },
-    "settings.codex.permission.subtitle": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Red light and a ribbon when Codex asks for approval; trusted commands are auto-allowed. Codex shows its own prompt right away."
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Красный свет и лента, когда Codex просит подтверждение; доверенные команды разрешаются автоматически. Codex сразу показывает свой запрос."
+            "value": "Präzise Statuserkennung"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Luz roja y cinta cuando Codex pide aprobación; los comandos de confianza se permiten automáticamente. Codex muestra su propia solicitud de inmediato."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Rotes Licht und Leiste, wenn Codex um Freigabe bittet; vertrauenswürdige Befehle werden automatisch erlaubt. Codex zeigt seine eigene Abfrage sofort."
+            "value": "Detección precisa del estado"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Feu rouge et bandeau quand Codex demande une approbation ; les commandes de confiance sont autorisées automatiquement. Codex affiche sa propre demande immédiatement."
-          }
-        }
-      }
-    },
-    "settings.codex.permission.title": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Codex permission prompts"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Запросы разрешений Codex"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Solicitudes de permiso de Codex"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Codex-Berechtigungsabfragen"
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Demandes d’autorisation Codex"
+            "value": "Détection précise du statut"
           }
         }
       }
@@ -5881,72 +6212,212 @@
         }
       }
     },
-    "settings.codex.trust.none": {
+    "settings.codex.trust.disabled": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No hooks installed."
+            "value": "Off in Codex: %@ — switch back on in Codex’s hook settings."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Хуки не установлены."
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sin hooks instalados."
+            "value": "Выключено в Codex: %@ — включить снова можно в настройках хуков Codex."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Keine Hooks installiert."
+            "value": "In Codex ausgeschaltet: %@ – wieder einschalten in den Hook-Einstellungen von Codex."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Desactivado en Codex: %@; se reactiva en los ajustes de hooks de Codex."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Aucun hook installé."
+            "value": "Désactivé dans Codex : %@ — à réactiver dans les réglages des hooks de Codex."
           }
         }
       }
     },
-    "settings.codex.trust.stale": {
+    "settings.codex.trust.featureOff": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No approval on record for the current hooks.json — review the hooks again in Codex (ChatGPT app → Codex settings → Hooks, or /hooks in the CLI)."
+            "value": "Hooks are turned off for all of Codex in ~/.codex/config.toml ([features] hooks = false)."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Для текущего hooks.json нет записи об одобрении — подтвердите хуки в Codex заново (приложение ChatGPT → настройки Codex → Hooks или /hooks в CLI)."
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No hay aprobación registrada para el hooks.json actual: revisa los hooks de nuevo en Codex (app de ChatGPT → ajustes de Codex → Hooks, o /hooks en la CLI)."
+            "value": "Хуки отключены для всего Codex в ~/.codex/config.toml ([features] hooks = false)."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Für die aktuelle hooks.json liegt keine Genehmigung vor – prüfe die Hooks in Codex erneut (ChatGPT-App → Codex-Einstellungen → Hooks oder /hooks in der CLI)."
+            "value": "Hooks sind für ganz Codex in ~/.codex/config.toml abgeschaltet ([features] hooks = false)."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Los hooks están desactivados para todo Codex en ~/.codex/config.toml ([features] hooks = false)."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Aucune approbation enregistrée pour le hooks.json actuel — revalidez les hooks dans Codex (app ChatGPT → réglages Codex → Hooks, ou /hooks dans la CLI)."
+            "value": "Les hooks sont désactivés pour tout Codex dans ~/.codex/config.toml ([features] hooks = false)."
+          }
+        }
+      }
+    },
+    "settings.codex.trust.modified": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Changed since approval — approve again: “Review hooks” in the Codex message box."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Изменились после одобрения — одобрите заново: «Проверить хуки» в поле ввода Codex."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Seit der Freigabe geändert – gib sie erneut frei: „Hooks prüfen“ im Codex-Eingabefeld."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cambiaron desde la aprobación; vuelve a aprobarlos: «Revisar hooks» en el cuadro de mensaje de Codex."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modifiés depuis l’approbation — approuvez-les à nouveau : « Examiner les hooks » dans la zone de saisie de Codex."
+          }
+        }
+      }
+    },
+    "settings.codex.trust.outdated": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installed by an older version of ccemaphore — update them. Codex will ask to approve them again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Установлены старой версией ccemaphore — обновите их. Codex попросит одобрить их заново."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Von einer älteren ccemaphore-Version installiert – aktualisiere sie. Codex fragt dann erneut nach der Freigabe."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Instalados por una versión anterior de ccemaphore: actualízalos. Codex pedirá aprobarlos de nuevo."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installés par une ancienne version de ccemaphore — mettez-les à jour. Codex demandera de les approuver à nouveau."
+          }
+        }
+      }
+    },
+    "settings.codex.trust.pending": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for approval: %@. In a Codex chat, click “Review hooks” in the message box."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Нужно одобрить: %@. В чате Codex нажмите «Проверить хуки» в поле ввода."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Freigabe ausstehend: %@. Klicke in einem Codex-Chat im Eingabefeld auf „Hooks prüfen“."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pendientes de aprobación: %@. En un chat de Codex, pulsa «Revisar hooks» en el cuadro de mensaje."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "En attente d’approbation : %@. Dans une conversation Codex, cliquez sur « Examiner les hooks » dans la zone de saisie."
+          }
+        }
+      }
+    },
+    "settings.codex.trust.silent": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approved, no signal yet — one arrives when Codex asks for approval or finishes a turn."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Одобрены, сигналов пока не было — он придёт, когда Codex попросит подтверждение или закончит ход."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Freigegeben, noch kein Signal – es kommt, sobald Codex um Freigabe bittet oder einen Zug beendet."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aprobados, aún sin señal: llegará cuando Codex pida aprobación o termine un turno."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approuvés, aucun signal pour l’instant — il arrivera quand Codex demandera une approbation ou terminera un tour."
           }
         }
       }
@@ -5957,101 +6428,66 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hook trust in Codex"
+            "value": "Hooks in Codex"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Доверие к хукам в Codex"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Confianza de hooks en Codex"
+            "value": "Хуки в Codex"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hook-Vertrauen in Codex"
+            "value": "Hooks in Codex"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hooks en Codex"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confiance des hooks dans Codex"
+            "value": "Hooks dans Codex"
           }
         }
       }
     },
-    "settings.codex.trust.trusted": {
+    "settings.codex.trust.working": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Trusted — Codex runs the hooks."
+            "value": "Working · last signal %@"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Доверены — Codex выполняет хуки."
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "De confianza: Codex ejecuta los hooks."
+            "value": "Работают · последний сигнал %@"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Vertraut – Codex führt die Hooks aus."
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Approuvés : Codex exécute les hooks."
-          }
-        }
-      }
-    },
-    "settings.codex.trust.untrusted": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Not reviewed yet: open the ChatGPT app → Codex settings → Hooks and approve hooks.json (or run /hooks in the Codex CLI). Until then the hooks never run."
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ещё не подтверждены: откройте приложение ChatGPT → настройки Codex → Hooks и одобрите hooks.json (или выполните /hooks в Codex CLI). До этого хуки не запускаются."
+            "value": "Aktiv · letztes Signal %@"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Aún sin revisar: abre la app de ChatGPT → ajustes de Codex → Hooks y aprueba hooks.json (o ejecuta /hooks en la CLI de Codex). Hasta entonces los hooks no se ejecutan."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Noch nicht geprüft: öffne die ChatGPT-App → Codex-Einstellungen → Hooks und genehmige hooks.json (oder führe /hooks in der Codex-CLI aus). Bis dahin laufen die Hooks nicht."
+            "value": "Funcionan · última señal %@"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pas encore validés : ouvrez l’app ChatGPT → réglages Codex → Hooks et approuvez hooks.json (ou lancez /hooks dans la CLI Codex). Jusque-là, les hooks ne s’exécutent pas."
+            "value": "Actifs · dernier signal %@"
           }
         }
       }
@@ -6266,6 +6702,41 @@
         }
       }
     },
+    "settings.groups.mode.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gruppierung"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Grouping"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agrupar"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Regrouper"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Группировка"
+          }
+        }
+      }
+    },
     "settings.groups.placeholder": {
       "extractionState": "manual",
       "localizations": {
@@ -6437,6 +6908,41 @@
           "stringUnit": {
             "state": "translated",
             "value": "manuel"
+          }
+        }
+      }
+    },
+    "settings.groups.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ordner, die die Repos eines Produkts bündeln"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Folders that bundle one product’s repos"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Carpetas que agrupan los repos de un producto"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dossiers qui regroupent les dépôts d’un produit"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Папки, объединяющие репозитории одного продукта"
           }
         }
       }
@@ -6791,6 +7297,41 @@
         }
       }
     },
+    "settings.registry.live": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aktive Sitzungen gerade: %lld"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live sessions now: %lld"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sesiones activas ahora: %lld"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sessions actives en ce moment : %lld"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сессий сейчас: %lld"
+          }
+        }
+      }
+    },
     "settings.registry.subtitle": {
       "extractionState": "manual",
       "localizations": {
@@ -7001,37 +7542,37 @@
         }
       }
     },
-    "settings.section.app": {
-      "extractionState": "stale",
+    "settings.section.claude": {
+      "extractionState": "manual",
       "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ALLGEMEIN"
-          }
-        },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "GENERAL"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "GENERAL"
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "GÉNÉRAL"
+            "value": "Claude Code"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ОБЩИЕ"
+            "value": "Claude Code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code"
           }
         }
       }
@@ -7067,6 +7608,181 @@
           "stringUnit": {
             "state": "translated",
             "value": "ДИАГНОСТИКА"
+          }
+        }
+      }
+    },
+    "settings.tab.agents": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agenten"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agents"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agentes"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agents"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Агенты"
+          }
+        }
+      }
+    },
+    "settings.tab.appearance": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ansicht"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appearance"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aspecto"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Affichage"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Вид"
+          }
+        }
+      }
+    },
+    "settings.tab.general": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allgemein"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "General"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "General"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Général"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Общие"
+          }
+        }
+      }
+    },
+    "settings.tab.notifications": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mitteilungen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alerts"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avisos"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alertes"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Уведомления"
+          }
+        }
+      }
+    },
+    "settings.tab.ssh": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SSH"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SSH"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SSH"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SSH"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SSH"
           }
         }
       }
@@ -7281,6 +7997,41 @@
         }
       }
     },
+    "settings.trusted.off": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Berechtigungsabfragen sind in Claude Code aus, daher wird diese Liste nicht genutzt. Schalte sie ein, um sie zu bearbeiten."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Permission prompts are off in Claude Code, so this list isn’t used. Turn them on to edit it."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Las solicitudes de permiso están desactivadas en Claude Code, así que esta lista no se usa. Actívalas para editarla."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les demandes d’autorisation sont désactivées dans Claude Code : cette liste n’est donc pas utilisée. Activez-les pour la modifier."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Запросы разрешений в Claude Code выключены, поэтому список не используется. Включите их, чтобы его редактировать."
+          }
+        }
+      }
+    },
     "settings.trusted.placeholder": {
       "extractionState": "manual",
       "localizations": {
@@ -7382,6 +8133,41 @@
           "stringUnit": {
             "state": "translated",
             "value": "Доверенные команды"
+          }
+        }
+      }
+    },
+    "settings.trusted.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Laufen ohne Berechtigungsabfrage"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run without a permission prompt"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se ejecutan sin solicitud de permiso"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "S’exécutent sans demande d’autorisation"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выполняются без запроса разрешения"
           }
         }
       }
@@ -9912,31 +10698,31 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Details stehen im Log (Einstellungen › Diagnose)."
+            "value": "Details stehen im Log (Einstellungen › Allgemein › Diagnose)."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The details are in the log (Settings › Diagnostics)."
+            "value": "The details are in the log (Settings › General › Diagnostics)."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Los detalles están en el registro (Ajustes › Diagnóstico)."
+            "value": "Los detalles están en el registro (Ajustes › General › Diagnóstico)."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Les détails sont dans le journal (Réglages › Diagnostic)."
+            "value": "Les détails sont dans le journal (Réglages › Général › Diagnostic)."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Подробности — в логе (Настройки › Диагностика)."
+            "value": "Подробности — в логе (Настройки › Общие › Диагностика)."
           }
         }
       }

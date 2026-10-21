@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Headless diagnostics for the Codex side (`--codex-scan`, `--codex-probe`) — the "look at it with your
 /// own eyes before wiring it in" step every new data source gets. No GUI, no writes.
@@ -21,7 +22,7 @@ enum CodexDiagnostic {
         print("imported-from-Claude threads: \(imported.count)")
 
         let store = CodexSessionStore()
-        let sessions = await store.rescan(now: now)
+        let sessions = await store.rescan(now: now).sessions
         print("\nlive Codex sessions: \(sessions.count)")
         for s in sessions {
             let age = Int(now.timeIntervalSince(s.lastActivity))
@@ -34,8 +35,85 @@ enum CodexDiagnostic {
                   + "\(ctx)\(rl)\(kids)\(origin)"
                   + (s.title.map { "\n           \"\($0)\"" } ?? ""))
             for c in s.children {
-                print("           └ \(c.state.rawValue) \(c.name)  age=\(Int(now.timeIntervalSince(c.lastActivity)))s")
+                print(Diagnostic.childLine(c, now: now))
             }
+        }
+    }
+
+    /// `ccemaphore --codex-watch [seconds]` — run the Codex store the way the GUI does (a rescan, FSEvents on
+    /// the sessions tree, the lock dir and the hook status dir, the `Tuning.codexPoll` growth poll and the `Tuning.stateTick`
+    /// re-evaluation) and print every change of a session's state or of its sub-agents' states. Live
+    /// tracking, checked without launching the app.
+    static func watch(seconds: TimeInterval) async {
+        setvbuf(stdout, nil, _IOLBF, 0)   // a live feed: line-buffered even into a pipe
+        let store = CodexSessionStore()
+        let clock = DateFormatter()
+        clock.dateFormat = "HH:mm:ss"
+        var last: [String: String] = [:]
+        // Hook records are folded in exactly as `StateEngine.render` does, so a waiting / compacting chat
+        // shows here too.
+        func report(_ snapshot: CodexSnapshot, _ source: String) {
+            let status = StatusReader.readAll().filter { SessionInfo.parseCodexID($0.key) != nil }
+            let sessions = CodexHookOverlay.apply(snapshot, status: status, now: Date())
+            var seen: [String: String] = [:]
+            for s in sessions {
+                let kids = s.children.sorted { $0.name < $1.name }
+                    .map { "\($0.headline)=\($0.state.rawValue)" }.joined(separator: " ")
+                let flags = (s.waitingKind.map { " (\($0.rawValue))" } ?? "") + (s.isCompacting ? " (compacting)" : "")
+                let line = "\(s.state.rawValue)\(flags)\(kids.isEmpty ? "" : "  [\(kids)]")"
+                seen[s.id] = line
+                if last[s.id] != line {
+                    print("\(clock.string(from: Date())) \(source.padding(toLength: 4, withPad: " ", startingAt: 0)) "
+                          + "\(s.displayName) (\(SessionInfo.parseCodexID(s.id)?.prefix(8) ?? "?")): \(line)")
+                }
+            }
+            for id in last.keys where seen[id] == nil {
+                print("\(clock.string(from: Date())) \(source) \(SessionInfo.parseCodexID(id)?.prefix(8) ?? "?"): left the list")
+            }
+            last = seen
+        }
+        // FSEvents batches are drained on the poll cadence (the GUI ingests them at once — same store call).
+        let events = OSAllocatedUnfairLock(initialState: [String]())
+        // The status dir too: a hook record re-renders at once, as `StateEngine`'s status watcher does.
+        let watchers = [CodexPaths.sessionsRoot, CodexPaths.writerLocksDir, HookHandler.statusDir].map { path in
+            TranscriptWatcher(path: path, onChange: { paths in events.withLock { $0 += paths } })
+        }
+        watchers.forEach { $0.start() }
+        report(await store.rescan(now: Date()), "scan")
+        let end = Date().addingTimeInterval(seconds)
+        var nextTick = Date().addingTimeInterval(Tuning.stateTick)
+        while Date() < end {
+            try? await Task.sleep(nanoseconds: UInt64(Tuning.codexPoll * 1_000_000_000))
+            let paths = events.withLock { batch in defer { batch = [] }; return batch }
+            if !paths.isEmpty { report(await store.ingest(paths: paths, now: Date()), "fsev") }
+            if let s = await store.poll(now: Date()) { report(s, "poll") }
+            if Date() >= nextTick {
+                report(await store.reevaluate(now: Date()), "tick")
+                nextTick = Date().addingTimeInterval(Tuning.stateTick)
+            }
+        }
+        watchers.forEach { $0.stop() }
+    }
+
+    /// `ccemaphore --codex-hooks-status` — install state, Codex's trust verdict per handler of ours (with
+    /// the key and both hashes, so a mismatch is diagnosable at a glance), and the last hook record.
+    static func hooksStatus() {
+        let st = CodexHooksInstaller.status()
+        print("hooks.json: \(CodexHooksInstaller.hooksPath)")
+        print("trust key:  \(CodexHooksInstaller.keyPath(CodexHooksInstaller.hooksPath))")
+        print("config:     \(CodexHooksInstaller.configPath)")
+        print("install: \(st.install.rawValue)  feature hooks: \(st.featureEnabled ? "on" : "OFF")  summary: \(st.summary)")
+        for e in st.entries {
+            let label = e.key.split(separator: ":").suffix(3).joined(separator: ":")
+            print("  [\(e.trust.rawValue.padding(toLength: 9, withPad: " ", startingAt: 0))] \(label)\(e.enabled ? "" : "  (disabled in Codex)")")
+            print("      current: \(e.currentHash)")
+            print("      trusted: \(e.trustedHash ?? "—")")
+        }
+        let last = StatusReader.readAll().values.filter { $0.agent == .codex }.max { $0.updatedAt < $1.updatedAt }
+        if let last {
+            print("last codex hook record: \(last.lastEvent ?? "?") → \(last.state.rawValue) at \(last.updatedAt) (\(SessionInfo.parseCodexID(last.id)?.prefix(8) ?? "?"))")
+        } else {
+            print("last codex hook record: none on disk")
         }
     }
 
@@ -51,14 +129,18 @@ enum CodexDiagnostic {
         } else {
             print("meta: (session_meta not found in the first \(CodexRolloutParser.headWindow / 1024) KB)")
         }
-        let lines = TailReader.tailLines(path: path)
-        let t = CodexRolloutParser.parseTail(lines: lines)
+        // The store's first read: the tail window, widened to the whole file when it holds no turn boundary.
+        let historyStart = CodexRolloutParser.readMeta(path: path)?.historyStartOrdinal
+        guard let (t, _, size) = CodexRolloutParser.read(path: path, historyStartOrdinal: historyStart) else {
+            print("tail: unreadable"); return
+        }
         let now = Date()
-        print("tail: lines=\(lines.count) parsed=\(t.linesParsed) turns=\(t.turnsSeen) native=\(t.nativeTurnSeen) import=\(t.importMarkerSeen)")
+        print("tail: parsed=\(t.linesParsed) lines of \(size / 1024) KB turns=\(t.turnsSeen) native=\(t.nativeTurnSeen) import=\(t.importMarkerSeen)")
         print("last activity: \(t.lastActivity.map { "\($0)  (\(Int(now.timeIntervalSince($0)))s ago)" } ?? "none")")
         print("open turn: \(t.openTurnId ?? "none")\(t.openTurnStartedAt.map { "  started \($0)" } ?? "")")
         print("last turn end: \(t.lastTurnEnd ?? "-") \(t.lastTurnEndedAt.map(String.init(describing:)) ?? "")")
-        print("approval_policy: \(t.approvalPolicy ?? "?")  cwd: \(t.cwd ?? "?")  roots: \(t.workspaceRoots)")
+        print("approval_policy: \(t.approvalPolicy ?? "?")  reviewer: \(t.approvalsReviewer ?? "? (user)")"
+              + "\(t.approvalsGoToUser ? "" : " → hook waits never turn it red")  cwd: \(t.cwd ?? "?")  roots: \(t.workspaceRoots)")
         print("context: \(t.context.map { "\(Int($0.usedPercent.rounded()))% of \($0.sizeTokens)" } ?? "?")")
         if let rl = t.rateLimits {
             func w(_ x: RateLimitInfo.Window?) -> String {

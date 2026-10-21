@@ -57,9 +57,11 @@ never window-switch just to check status.
   ChatGPT app). **Open chat** — or a click on the chat's row in the panel — opens the right place: a
   Cursor tab, the Claude app session, or the Codex thread.
 - **Sub-agents.** A chat that spawned sub-agents (Claude `Task` agents, workflows, Codex sub-agent
-  threads) grows a chevron — expand it to see what each one is doing.
+  threads) grows a chevron. Expand it and every sub-agent reads the same for both agents: what it's for
+  (Claude's task description, Codex's task name), who it is (the agent type, the Codex nickname) and,
+  while it works, what it's doing right now — the file it reads, the command it runs.
 - **Group by product.** Working on a backend, a frontend and a landing of one product at once? Pick
-  **By product** in **Settings ▸ Product groups**: the Chats tab then groups chats by product folder
+  **By product** in **Settings ▸ Appearance** (the folders live one level down, in **Product groups**): the Chats tab then groups chats by product folder
   (`product › sub-repo`), with ChatGPT app projects and multi-repo folders suggested automatically.
 - **Codex limits.** The 5-hour / weekly usage windows Codex reports, at the bottom of the Chats tab.
 
@@ -72,7 +74,7 @@ Token & cost stats per session and a daily history window come from
 ## Languages
 
 ccemaphore ships fully localized in **English, Русский, Español, Deutsch, Français**, with **live**
-switching — no relaunch. Open **Settings ▸ Language** and pick one from the menu (each shows its own
+switching — no relaunch. Open **Settings ▸ General ▸ Language** and pick one from the menu (each shows its own
 name and flag); the whole UI re-renders instantly. Leave it on **System** to follow your macOS
 preferred languages (falling back to English).
 
@@ -88,12 +90,12 @@ Only these things reach the network:
 
 - **Update checks → GitHub.** Unless you turn updates off, ccemaphore asks GitHub once a day whether
   there's a new version, and downloads it from there. GitHub sees your IP address, the app version (in
-  the User-Agent, e.g. `ccemaphore/1.3.0 Sparkle/2.10.0`) and your preferred language (the
+  the User-Agent, e.g. `ccemaphore/1.3.1 Sparkle/2.10.0`) and your preferred language (the
   `Accept-Language` header macOS adds). Each check also bumps the public download counter of the
   release's `appcast.xml` — one aggregate number anyone can see, with nothing that identifies you.
   Cookies are not stored, and no system profile is sent.
 - **Your call.** On first launch the panel asks how to update — automatically, notify only, or off — and
-  no automatic check runs before you answer. Change it any time in **Settings ▸ Updates**; with updates
+  no automatic check runs before you answer. Change it any time in **Settings ▸ General ▸ Updates**; with updates
   off, ccemaphore never checks on its own (you can still check by hand).
 - **ccusage** (token & cost stats, only when Node or Bun is installed) runs via `bunx`/`npx`, which may
   fetch the package from the npm registry; ccusage itself may download current model pricing.
@@ -142,16 +144,21 @@ The hook install is an idempotent merge into `~/.claude/settings.json` and is fu
 ### Codex (ChatGPT app) — file-watch + optional hooks
 
 When `~/.codex` exists, ccemaphore also watches Codex: the rollout transcripts
-(`~/.codex/sessions/**/rollout-*.jsonl` — `task_started` / `task_complete` / `turn_aborted` give
-working / done), the thread catalog (`state_5.sqlite`, opened read-only — titles, folders, projects,
+(`~/.codex/sessions/**/rollout-*.jsonl` — `task_started` / `task_complete` / `turn_aborted` give working
+/ done; Codex keeps a thread's transcript open while it runs, so ccemaphore checks the open ones for new
+lines every 1.5 s), the thread catalog (`state_5.sqlite`, opened read-only — titles, folders, projects,
 archive state) and the per-thread writer locks (held while the ChatGPT app has a thread open). Codex does
-not write approval requests into its transcripts, so "needs you" for Codex comes only from hooks:
-**Precise status via Codex hooks** writes ccemaphore's hooks to `~/.codex/hooks.json`, and the separate
-**Codex permission prompts** toggle turns an approval request into a red light + ribbon (trusted commands
-are auto-allowed). Codex only runs hooks it has **trusted**: after installing, approve `hooks.json` once
-in the ChatGPT app (Codex settings → Hooks) or with `/hooks` in the Codex CLI — the Settings row tells you
-where that stands. A thread the ChatGPT app *imported* from Claude Code keeps its Claude badge; a pure
-mirror with no Codex turns is hidden, so nothing is listed twice.
+not write approval requests into its transcripts, so "needs you" for Codex comes from hooks: **Precise
+status detection** in the **Codex** section adds five small hooks to `~/.codex/hooks.json` — a red light
+while Codex waits for your approval (in a sub-agent too: its chat turns red; not under Codex's
+auto-review, where nobody is asked — and after you approve a long command, until it finishes), the
+compaction chip, and a reset when a turn stops; working / done keeps coming from the transcripts. Codex
+runs a hook only after you **approve** it: open a Codex chat and click **Review hooks** in the message
+box (or run `/hooks` in the Codex CLI). The Settings row shows where that stands — waiting for approval,
+approved, when a hook last fired — and opens the ChatGPT app for you. Commands on your trusted list are
+allowed without the prompt here too. Your own hooks in `hooks.json` are kept. A thread the ChatGPT app
+*imported* from Claude Code keeps its Claude badge; a pure mirror with no Codex turns is hidden, so
+nothing is listed twice.
 
 ## Install
 
@@ -168,10 +175,11 @@ mirror with no Codex turns is hidden, so nothing is listed twice.
   to raise an already-open VS Code Remote-SSH window instead of opening a new one.
 - **Pick how ccemaphore updates** — the panel asks once: automatically, notify only, or off
   ([details ↓](#updates)).
-- **Turn on "Precise status detection"** in Settings to enable Mode B (hooks + the permission ribbon).
-- **Using Codex in the ChatGPT app?** It's picked up automatically. For instant done / needs-you,
-  turn on **Precise status via Codex hooks** (and **Codex permission prompts**), then approve the hooks
-  once in the ChatGPT app's Codex settings — the row shows when it's trusted.
+- **Turn on "Precise status detection"** in **Settings ▸ Agents ▸ Claude Code** to enable Mode B (hooks + the
+  permission ribbon).
+- **Using Codex in the ChatGPT app?** It's picked up automatically. To see when Codex needs your
+  approval, turn on **Precise status detection** in **Settings ▸ Agents ▸ Codex**, then click
+  **Review hooks** once in a Codex chat's message box — the row shows when they're approved.
 - **Both apps notify you themselves.** If the light is enough, mute the Claude app / ChatGPT app in
   System Settings ▸ Notifications, or in each app's own notification settings.
 - **For token & cost stats**, make sure Node or Bun is on your `PATH` — ccemaphore runs
@@ -187,7 +195,7 @@ mirror with no Codex turns is hidden, so nothing is listed twice.
 
 ccemaphore keeps itself up to date with [Sparkle](https://sparkle-project.org):
 
-- **Three modes**, chosen once on first launch and changeable in **Settings ▸ Updates** (which also shows
+- **Three modes**, chosen once on first launch and changeable in **Settings ▸ General ▸ Updates** (which also shows
   your version and the last check):
   - **Automatic** — checks once a day and downloads in the background; when the new version is
     ready, a single **Restart** click swaps it in and relaunches. Quitting normally installs it too.
@@ -253,7 +261,7 @@ Thanks to everyone who contributed features to ccemaphore:
   ([#2](https://github.com/hakkazuu/ccemaphore/pull/2)).
 
 In-app updates are powered by [Sparkle](https://sparkle-project.org) (MIT License). Its license, together
-with the notices of the code it includes, ships inside the app (open it from **Settings ▸ Updates**) and
+with the notices of the code it includes, ships inside the app (open it from **Settings ▸ General ▸ Updates**) and
 in [`Resources/ThirdPartyNotices.txt`](Resources/ThirdPartyNotices.txt).
 
 ## License

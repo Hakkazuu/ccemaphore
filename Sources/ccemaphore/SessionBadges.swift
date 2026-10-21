@@ -55,9 +55,10 @@ struct HostGlyph: View {
     }
 }
 
-/// One sub-agent / child-session line under an expanded chat row: indented, a smaller status dot, the
-/// agent's name, its prompt/title (secondary) and age. Tapping it jumps to the PARENT chat (a child has
-/// no surface of its own in any host).
+/// One sub-agent / child-session line under an expanded chat row — the same layout for Claude and Codex:
+/// a smaller status dot, the headline (what it's for), who it is (secondary, when known), its age; under
+/// it what it's doing right now while it works, else its task. Tapping it jumps to the PARENT chat (a
+/// child has no surface of its own in any host).
 struct ChildAgentRow: View {
     let child: ChildAgent
     let onTap: () -> Void
@@ -69,10 +70,18 @@ struct ChildAgentRow: View {
             StatusDot(color: DS.status(child.state), diameter: 6, glow: 4)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 5) {
-                    Text(child.name)
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    Text(child.headline)
+                        .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(DS.textSecondary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
+                    if let who = child.who, who != child.headline {
+                        Text(who)
+                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(DS.textTertiary)
+                            .lineLimit(1)
+                    }
                     if child.kind == .workflow {
                         Text(L("child.kind.workflow"))
                             .font(.system(size: 8.5, weight: .bold, design: .rounded))
@@ -81,9 +90,9 @@ struct ChildAgentRow: View {
                             .background(DS.neutralBtn, in: Capsule())
                     }
                 }
-                if let t = child.title, !t.isEmpty {
-                    Text(t)
-                        .font(.system(size: 10))
+                if let detail = child.detail {
+                    Text(detail)
+                        .font(.system(size: 10, design: child.state == .working && child.activity != nil ? .monospaced : .default))
                         .foregroundStyle(DS.textTertiary)
                         .lineLimit(1)
                         .truncationMode(.tail)

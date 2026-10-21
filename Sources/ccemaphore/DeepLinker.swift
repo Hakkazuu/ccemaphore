@@ -309,6 +309,18 @@ enum DeepLinker {
         Log.focus.info("jump sid=\(sid) host=desktop deeplink=\(ok ? "ok" : "FAILED") handle=\(handle.prefix(14))")
     }
 
+    /// Bring up the ChatGPT app, launching it if needed — the Settings action that sends the user to
+    /// approve our Codex hooks ("Review hooks" over the message box).
+    static func openCodexApp() {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: codexAppBundleId) else {
+            Log.focus.warn("open codex app: \(codexAppBundleId) not installed")
+            return
+        }
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            if let error { Log.focus.warn("open codex app failed: \(error.localizedDescription)") }
+        }
+    }
+
     /// Codex (ChatGPT.app): the documented `codex://threads/<thread_id>` link opens that exact thread.
     /// If the scheme isn't handled (ChatGPT.app not installed) fall back to raising the app if present.
     private static func focusCodex(sessionId: String, sid: Substring) {

@@ -149,13 +149,12 @@ enum PermissionBroker {
         // Snapshot the raw payload (overwrite per event) so the first real prompt on any host — Cursor
         // included — lets `--perm-diag` confirm the event fires AND reveal its exact field shape.
         writeDiag(event: event, raw: data, agent: agent)
-        guard let rawSid = json["session_id"] as? String, !rawSid.isEmpty else {
+        guard let sid = HookHandler.statusKey(agent: agent, payload: json) else {
             // Mirror HookHandler's guard log: a dropped permission prompt must be visible in the log,
             // not only recoverable via a manual `--perm-diag` snapshot.
             Log.permissions.warn("request event=\(event.wire) agent=\(agent.rawValue) ignored: missing/empty session_id (\(data.count)B stdin)")
             return
         }
-        let sid = agent == .codex ? SessionInfo.codexID(threadId: rawSid.lowercased()) : rawSid
         let tool = json["tool_name"] as? String ?? L("permission.tool.fallback")
         let cwd = json["cwd"] as? String ?? ""
 
@@ -222,7 +221,9 @@ enum PermissionBroker {
         let host = ProcTree.sessionContext(agent: agent).host
         // The wait window is a real one only for a host that may block (see `mayBlock`) AND a VISIBLE
         // widget (the ribbon is then on screen with live buttons); otherwise 0, hand off at once.
-        let waitWindow = mayBlock(on: host) ? AppPresence.waitWindow(readiness) : 0
+        // Codex never: it runs the hook BEFORE showing its own prompt, whatever host the process tree
+        // suggests (a Codex CLI inside an IDE's terminal included).
+        let waitWindow = agent != .codex && mayBlock(on: host) ? AppPresence.waitWindow(readiness) : 0
 
         // No wait window → don't flash a decision ribbon whose buttons can't be answered (the broker
         // won't be here to read them). Keep the chat red with the informational `permission-native`

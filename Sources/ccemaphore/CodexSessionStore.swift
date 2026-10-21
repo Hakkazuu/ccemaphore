@@ -23,6 +23,10 @@ actor CodexSessionStore {
         var tail: CodexTail
         var row: CodexThreadRow?
         var lockHeld: Bool?
+        /// Where the next read of `path` continues (`CodexRolloutParser.readMore`), and the file size seen
+        /// by the last read — `poll` re-reads only a rollout whose size moved off it.
+        var resumeAt: UInt64 = 0
+        var size: UInt64 = 0
         /// A native Codex turn was observed in THIS thread at some point. Sticky: the tail only sees the
         /// last 512 KB, so a long turn whose `task_started` scrolled out would otherwise re-hide a
         /// continued import mid-work.
@@ -54,7 +58,7 @@ actor CodexSessionStore {
     /// tail. Candidates = catalog rows touched within `staleWindow` ∪ rollouts written in the last days
     /// (a brand-new thread the catalog hasn't indexed yet) ∪ every thread whose writer lock is held (open
     /// in the app, however old). Archived rows are dropped.
-    func rescan(now: Date) -> [SessionInfo] {
+    func rescan(now: Date) -> CodexSnapshot {
         refreshCatalog(now: now, force: true)
         var candidates: [String: String] = [:]   // id → rollout path
         for (id, row) in rows where !row.archived && now.timeIntervalSince(row.updatedAt) <= staleWindow {
@@ -87,7 +91,7 @@ actor CodexSessionStore {
     }
 
     /// FSEvents batch over the rollout tree (and the lock dir): re-read only the touched threads.
-    func ingest(paths: [String], now: Date) -> [SessionInfo] {
+    func ingest(paths: [String], now: Date) -> CodexSnapshot {
         refreshCatalog(now: now, force: false)
         var touched = false
         for path in Set(paths) {
@@ -116,8 +120,31 @@ actor CodexSessionStore {
         return snapshot(now: now)
     }
 
+    /// Growth of the tracked rollouts (the `Tuning.codexPoll` timer). FSEvents can't be the trigger here:
+    /// Codex keeps every loaded thread's rollout OPEN for writing (the ChatGPT app's `codex` process holds
+    /// the fd for the thread's lifetime) and the kernel reports a content change only when the writer
+    /// closes the file — so a running thread's appends produce no events at all (codex-cli 0.163: 30 KB
+    /// appended in 20 s, zero events; file and lock-file CREATION is still reported, see `ingest`). One
+    /// `stat` per tracked rollout; only those that grew are re-read, from where the last read stopped.
+    /// nil ⇒ nothing changed (the caller skips the render).
+    func poll(now: Date) -> CodexSnapshot? {
+        var changed = false
+        for (id, rec) in records {
+            guard let size = Self.fileSize(rec.path), size != rec.size else { continue }
+            read(id: id, path: rec.path, lockHeld: rec.lockHeld)
+            changed = true
+        }
+        return changed ? snapshot(now: now) : nil
+    }
+
+    private static func fileSize(_ path: String) -> UInt64? {
+        var st = stat()
+        guard stat(path, &st) == 0 else { return nil }
+        return UInt64(st.st_size)
+    }
+
     /// Time passes (the 5 s tick): re-check locks (cheap), re-derive states, age things out.
-    func reevaluate(now: Date) -> [SessionInfo] {
+    func reevaluate(now: Date) -> CodexSnapshot {
         refreshCatalog(now: now, force: false)
         refreshLocks()
         return snapshot(now: now)
@@ -126,15 +153,22 @@ actor CodexSessionStore {
     // MARK: - Reading
 
     private func read(id: String, path: String, lockHeld: Bool?) {
-        let tail = CodexRolloutParser.tail(path: path)
-        guard tail.linesParsed > 0 else { return }
+        // Continue the same file from where the last read stopped; a first read, another path or a file
+        // that shrank (replaced) starts over. A rollout still EMPTY is tracked too (`snapshot` skips it):
+        // its creation may be the only FSEvents event it ever produces, and `poll` must see it grow.
+        let prev = records[id].flatMap { $0.path == path ? $0 : nil }
+        let meta = records[id]?.meta ?? CodexRolloutParser.readMeta(path: path)
+        guard let (tail, resumeAt, size) = prev.flatMap({ CodexRolloutParser.readMore(path: path, after: $0.tail, from: $0.resumeAt) })
+                ?? CodexRolloutParser.read(path: path, historyStartOrdinal: meta?.historyStartOrdinal) else { return }
         var rec = records[id] ?? Record(id: id, path: path, meta: nil, tail: tail, row: rows[id], lockHeld: lockHeld)
         rec.path = path
         rec.tail = tail
+        rec.resumeAt = resumeAt
+        rec.size = size
         rec.row = rows[id]
         rec.lockHeld = lockHeld
         rec.nativeTurnSeen = rec.nativeTurnSeen || tail.nativeTurnSeen
-        if rec.meta == nil { rec.meta = CodexRolloutParser.readMeta(path: path) }
+        if rec.meta == nil { rec.meta = meta }
         records[id] = rec
     }
 
@@ -180,14 +214,14 @@ actor CodexSessionStore {
 
     // MARK: - Snapshot
 
-    private func snapshot(now: Date) -> [SessionInfo] {
+    private func snapshot(now: Date) -> CodexSnapshot {
         // Sub-agent threads → children of their parent (by catalog parentage, else the rollout's own meta).
         var childrenByParent: [String: [(Record, String?)]] = [:]
         var parents: [Record] = []
-        for rec in records.values {
+        for rec in records.values where rec.tail.linesParsed > 0 {
             if let parent = rec.row?.parentThreadId ?? rec.meta?.parentThreadId {
                 childrenByParent[parent, default: []].append((rec, rec.row?.agentNickname ?? rec.meta?.agentNickname))
-            } else if rec.row?.isSubagent == true || rec.meta?.threadSource == "subagent" {
+            } else if rec.row?.isSubagent == true || rec.meta?.isSubagent == true {
                 continue   // parent-less helper thread (guardian etc.) — never a chat
             } else {
                 parents.append(rec)
@@ -195,6 +229,8 @@ actor CodexSessionStore {
         }
 
         var infos: [SessionInfo] = []
+        // Every listed thread's OWN facts, sub-agents included (`CodexHookOverlay` judges hook records by them).
+        var threads: [String: CodexThreadFacts] = [:]
         for rec in parents {
             let isImport = importedIds.contains(rec.id) || rec.tail.importMarkerSeen
             if isImport && !rec.nativeTurnSeen { continue }   // a pure mirror of a Claude chat → hidden
@@ -203,17 +239,27 @@ actor CodexSessionStore {
             guard var lastActivity = rec.tail.lastActivity ?? rec.row?.updatedAt else { continue }
             var state = CodexRolloutParser.state(of: rec.tail, now: now, lockHeld: rec.lockHeld,
                                                  activeWindow: activeWindow, staleWindow: staleWindow)
+            let chatId = SessionInfo.codexID(threadId: rec.id)
+            threads[chatId] = CodexThreadFacts(chatId: chatId, state: state, lastActivity: rec.tail.lastActivity,
+                                               approvalsGoToUser: rec.tail.approvalsGoToUser)
 
             var children: [ChildAgent] = []
             for (child, nick) in childrenByParent[rec.id] ?? [] {
                 let cs = CodexRolloutParser.state(of: child.tail, now: now, lockHeld: child.lockHeld,
                                                   activeWindow: activeWindow, staleWindow: staleWindow)
+                // A sub-agent that hasn't said who reviews its approvals inherits its parent's reviewer.
+                threads[SessionInfo.codexID(threadId: child.id)] =
+                    CodexThreadFacts(chatId: chatId, state: cs, lastActivity: child.tail.lastActivity,
+                                     approvalsGoToUser: child.tail.approvalsReviewer == nil
+                                        ? rec.tail.approvalsGoToUser : child.tail.approvalsGoToUser)
                 guard cs != .stale else { continue }
                 let cl = child.tail.lastActivity ?? now
                 children.append(ChildAgent(id: SessionInfo.codexID(threadId: child.id),
                                            name: nick ?? child.row?.displayTitle ?? String(child.id.prefix(8)),
                                            kind: .codexSubagent, state: cs, lastActivity: cl,
-                                           title: child.row?.displayTitle))
+                                           title: child.row?.displayTitle,
+                                           purpose: Self.taskName(child.meta?.agentPath),
+                                           who: nick, activity: child.tail.lastAction))
                 // A running child keeps the parent working (the same fold as Claude's Task sub-agents).
                 if cs == .working, now.timeIntervalSince(cl) <= Tuning.subagentGrace {
                     state = .working
@@ -234,7 +280,7 @@ actor CodexSessionStore {
                 ?? rec.row?.displayTitle ?? "Codex"
             let title = rec.row?.displayTitle ?? rec.tail.lastUserMessage.map { truncate($0) }
             var info = SessionInfo(
-                id: SessionInfo.codexID(threadId: rec.id),
+                id: chatId,
                 project: project,
                 cwd: cwd,
                 gitBranch: rec.row?.gitBranch ?? rec.meta?.gitBranch,
@@ -258,7 +304,16 @@ actor CodexSessionStore {
             }
             infos.append(info)
         }
-        return sortedForDisplay(infos)
+        let listed = Set(infos.map(\.id))
+        return CodexSnapshot(sessions: sortedForDisplay(infos), threads: threads.filter { listed.contains($0.value.chatId) })
+    }
+
+    /// `/root/analysis_rag` → "Analysis rag": the last path component, separators as spaces.
+    static func taskName(_ agentPath: String?) -> String? {
+        guard let last = agentPath.map({ ($0 as NSString).lastPathComponent }), !last.isEmpty, last != "root" else { return nil }
+        let words = last.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
+            .split(separator: " ").joined(separator: " ")
+        return words.prefix(1).uppercased() + words.dropFirst()
     }
 
     private func truncate(_ s: String, _ max: Int = 60) -> String {

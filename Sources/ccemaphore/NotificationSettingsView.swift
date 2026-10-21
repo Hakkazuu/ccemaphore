@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The "Уведомления и звук" section of the Settings tab. Three parameters — показ / звук / громкость —
+/// Settings › Notifications. Three parameters — показ / звук / громкость —
 /// with a general default that applies to every type, plus a per-type "Настроить отдельно" override that
 /// reveals the same three controls for that one type (Завершение / Запрос разрешения / Вопрос агента).
 ///
@@ -20,6 +20,7 @@ struct NotificationSettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             caption(L("notif.general.caption"))
+                .padding(.top, 8)
             if let err = importError { errorBanner(err) }
 
             // General defaults (inherited by every type that isn't set apart).
@@ -59,7 +60,7 @@ struct NotificationSettingsView: View {
                 Text(L("notif.type.override"))
                     .font(.system(size: 10))
                     .foregroundStyle(DS.textTertiary)
-                switchToggle(overrideBinding(t))
+                switchToggle(overrideBinding(t).animation(DS.settingsFade))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -71,6 +72,7 @@ struct NotificationSettingsView: View {
                     volumeRow(L("notif.volume"), volumeBinding(t))
                 }
                 .padding(.leading, 12)   // indent so the overridden controls read as belonging to the type
+                .transition(.opacity)
             }
         }
     }

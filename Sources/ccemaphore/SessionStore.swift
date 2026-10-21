@@ -51,9 +51,14 @@ actor SessionStore {
                 classifySession(id: id, slug: slug, path: path, now: now)
             case .subagent(let parentId, _, let workflowId):
                 // One tail read + decode serves both the child record and the parent's working fold.
-                let parsed = TailReader.tailLines(path: path).compactMap(LogLine.decode)
-                let tail = subagentTail(parsed, now: now)
-                noteChild(parentId: parentId, path: path, workflowId: workflowId, tail: tail)
+                let lines = TailReader.tailLines(path: path)
+                let parsed = lines.compactMap(LogLine.decode)
+                // Claude Code marks a finished sub-agent in its meta file — more precise than the tail.
+                let meta = ClaudeSubagentMeta.read(transcriptPath: path)
+                var tail = subagentTail(parsed, now: now)
+                if meta?.finished == true { tail?.active = false }
+                noteChild(parentId: parentId, path: path, workflowId: workflowId, tail: tail,
+                          meta: meta, action: AgentAction.lastClaude(in: lines))
                 if tail?.active == true {
                     if let workflowId {
                         // Workflow fan-out agent: track per-workflow so the run's completion record can
@@ -144,8 +149,12 @@ actor SessionStore {
         return kids.compactMap { id, c -> ChildAgent? in
             guard now.timeIntervalSince(c.lastActivity) <= staleWindow else { return nil }
             let working = c.active && now.timeIntervalSince(c.lastActivity) <= Tuning.subagentGrace
+            // The generic agent type says nothing the headline doesn't; a specialised one (Explore, a
+            // custom agent) is worth showing.
+            let who = c.agentType.flatMap { $0 == "general-purpose" ? nil : $0 }
             return ChildAgent(id: id, name: c.name, kind: c.kind, state: working ? .working : .done,
-                              lastActivity: c.lastActivity, title: c.title)
+                              lastActivity: c.lastActivity, title: c.title,
+                              purpose: c.purpose, who: who, activity: c.action)
         }.sorted { $0.lastActivity > $1.lastActivity }
     }
 
@@ -153,7 +162,8 @@ actor SessionStore {
     /// file stem; its title is the Task prompt (the transcript's first user line), read once from the file
     /// head — the parent's `Task` tool_use carries the human description, but that lives in the PARENT's
     /// transcript, not here, so the prompt's first line is the best self-contained label we have.
-    private func noteChild(parentId: String, path: String, workflowId: String?, tail: (lastTs: Date, active: Bool)?) {
+    private func noteChild(parentId: String, path: String, workflowId: String?, tail: (lastTs: Date, active: Bool)?,
+                           meta: ClaudeSubagentMeta?, action: AgentAction?) {
         guard let tail else { return }
         let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
         let childId = stem.hasPrefix("agent-") ? String(stem.dropFirst("agent-".count)) : stem
@@ -163,6 +173,11 @@ actor SessionStore {
             lastActivity: tail.lastTs, active: tail.active, title: nil, titleResolved: false)
         rec.lastActivity = max(rec.lastActivity, tail.lastTs)
         rec.active = tail.active
+        if let meta {
+            rec.purpose = meta.description ?? rec.purpose
+            rec.agentType = meta.agentType ?? rec.agentType
+        }
+        if let action { rec.action = action }
         if !rec.titleResolved {
             // One head read per child once its first line is complete: that line is the Task prompt or it
             // isn't. A file still being flushed (FSEvents fires on creation, before the large first user
@@ -355,6 +370,11 @@ private struct ChildRecord {
     var active: Bool
     var title: String?
     var titleResolved: Bool
+    /// From `agent-<id>.meta.json` (`ClaudeSubagentMeta`): the Task description and agent type.
+    var purpose: String? = nil
+    var agentType: String? = nil
+    /// Its latest tool call (`AgentAction.lastClaude`).
+    var action: AgentAction? = nil
 }
 
 /// Internal per-session record: raw signals, so `state(of:now:)` can re-derive the state on a timer

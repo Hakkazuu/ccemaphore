@@ -102,11 +102,8 @@ final class WidgetSettings: ObservableObject {
     /// Session ids whose row is expanded to show sub-agents (the chevron). Remembered across launches.
     @Published private var expandedSessions: Set<String> { didSet { d.set(Array(expandedSessions), forKey: K.expandedSessions) } }
 
-    /// Which settings sections are currently EXPANDED (by section id). Default empty = every section
-    /// collapsed, so the (long) Settings tab opens compact and the user expands only what they need. The
-    /// choice is remembered across launches. Storing the *expanded* set (not collapsed) means a brand-new
-    /// section added in a future build starts collapsed automatically.
-    @Published private var expandedSections: Set<String> { didSet { d.set(Array(expandedSections), forKey: K.expandedSections) } }
+    /// The Settings tab the panel's Settings screen opens on — the last one the user picked.
+    @Published var settingsTab: SettingsTab { didSet { d.set(settingsTab.rawValue, forKey: K.settingsTab) } }
 
     private let d = UserDefaults.standard
     /// displayId → stored origin. This is `panel.frame.origin`, i.e. an ABSOLUTE global-coordinate
@@ -124,7 +121,9 @@ final class WidgetSettings: ObservableObject {
         static let positions = "widget.positions"
         static let lastDisplayID = "widget.lastDisplayID"
         static let watchIDELog = "widget.watchIDELog"
-        static let expandedSections = "settings.expandedSections"
+        static let settingsTab = "settings.tab"
+        /// Left by builds whose Settings was one page of collapsible sections; removed on launch.
+        static let obsolete = ["settings.expandedSections", "settings.claudeSectionSplit"]
         static let useSessionRegistry = "claude.useSessionRegistry"
         static let codexEnabled = "codex.enabled"
         static let desktopPermissionWait = PermissionBroker.desktopWaitDefaultsKey
@@ -148,17 +147,10 @@ final class WidgetSettings: ObservableObject {
         desktopPermissionWait = d.bool(forKey: K.desktopPermissionWait)   // default OFF (see doc above)
         expandedSessions = Set(d.stringArray(forKey: K.expandedSessions) ?? [])
         grouping = Grouping(rawValue: d.string(forKey: K.grouping) ?? "") ?? .status
-        expandedSections = Set(d.stringArray(forKey: K.expandedSections) ?? [])   // default: all collapsed
+        settingsTab = SettingsTab.stored(d.string(forKey: K.settingsTab))
+        for key in K.obsolete where d.object(forKey: key) != nil { d.removeObject(forKey: key) }
         positions = Self.decodePositions(d.data(forKey: K.positions))
         lastDisplayID = d.string(forKey: K.lastDisplayID)
-    }
-
-    // MARK: - Settings-section collapse state
-
-    func isSectionExpanded(_ id: String) -> Bool { expandedSections.contains(id) }
-
-    func toggleSection(_ id: String) {
-        if expandedSections.contains(id) { expandedSections.remove(id) } else { expandedSections.insert(id) }
     }
 
     // MARK: - Expandable session rows (sub-agents)

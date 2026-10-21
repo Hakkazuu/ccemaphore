@@ -18,12 +18,19 @@ Sources of state, per agent:
   state from each transcript's tail. Also supplies title/branch/context % and sub-agent children.
 - **Claude Code — Mode B (opt-in)** — installs Claude Code hooks for *precise* `done`/`waiting`
   detection and the interactive permission ribbon (Allow / Deny / All in chat).
-- **Codex — Mode A (always on when `~/.codex` exists)** — FSEvents over `~/.codex/sessions/**/rollout-*.jsonl`
+- **Codex — Mode A (always on when `~/.codex` exists)** — rollouts `~/.codex/sessions/**/rollout-*.jsonl`
   + the SQLite thread catalog (`state_5.sqlite`, read-only) + writer locks (`thread-writer-locks/`).
+  Codex keeps a loaded thread's rollout OPEN for writing, so FSEvents reports only its creation; growth is
+  picked up by a `stat` poll (`Tuning.codexPoll`) and parsed incrementally from where the last read stopped.
   `CodexSessionStore`/`CodexRolloutParser`/`CodexIndex`/`CodexPaths`. Sessions are keyed `codex:<thread_id>`.
-- **Codex — Mode B (opt-in)** — `CodexHooksInstaller` writes our hooks (tagged `--agent codex`) to
-  `~/.codex/hooks.json`; Codex must then TRUST the file (hash-bound, user action in the ChatGPT app or
-  `/hooks`). We never write that trust record ourselves.
+- **Codex — Mode B (opt-in)** — `CodexHooksInstaller` writes 5 hooks (tagged `--agent codex`:
+  PermissionRequest, Stop, Interrupt, Pre/PostCompact) to `~/.codex/hooks.json`. They add only what a
+  rollout can't show — waiting for approval (→ red, a sub-agent's on its parent chat; only where the user
+  reviews approvals — under Codex's `auto_review` a guardian decides and nobody is asked) and compaction;
+  working / done stays Mode A's (`CodexHookOverlay`). Codex runs a hook only once the user approves it
+  ("Review hooks" in a Codex chat's message box, `/hooks` in the CLI): trust is per handler and
+  hash-bound — `CodexHookTrust` mirrors the algorithm (verified against the real codex app-server) to
+  show where it stands. We never write that trust record ourselves.
 - Hosts (`SessionHost`): `ide` (Cursor/VS Code), `terminal`, `desktop` (Claude app), `codexApp`
   (ChatGPT app). The permission broker may block only where the host shows its own prompt alongside
   (`PermissionBroker.mayBlock`): IDE yes; desktop behind `WidgetSettings.desktopPermissionWait`; Codex never.
@@ -68,14 +75,17 @@ with any change here.
 
 - **State / orchestration:** `StateEngine` (`@MainActor ObservableObject`, the single source the UI
   observes), `SessionStore` (Claude transcripts + sub-agent children), `SessionRegistryReader`
-  (Claude Code's own registry), `CodexSessionStore` (Codex), `ProductGroups` (grouping by product folder),
-  `Models`.
+  (Claude Code's own registry), `CodexSessionStore` (Codex → `CodexSnapshot`), `CodexHookOverlay` (folds
+  Codex hook records into the Codex rows), `ProductGroups` (grouping by product folder), `Models`,
+  `AgentAction` (a sub-agent's latest tool call / command — one shape for Claude and Codex — plus
+  `ClaudeSubagentMeta`, the `agent-<id>.meta.json` beside a Claude sub-agent transcript).
 - **Transcript watching / classification:** `TranscriptWatcher` (FSEvents), `TranscriptParser`,
   `TailReader`, `StatusReader`, `SessionPath`; Codex: `CodexPaths`, `CodexRolloutParser`, `CodexIndex`
   (SQLite3, read-only, retried).
 - **Mode B hooks:** `HookHandler` (`--hook <event> [--agent codex]` writes `~/.claude/status/<id>.json`,
   no `jq` dep), `HooksInstaller` (idempotent settings.json merge), `CodexHooksInstaller`
-  (`~/.codex/hooks.json`, trust state), `PermissionBroker` (blocking PermissionRequest flow +
+  (`~/.codex/hooks.json` install / update / status), `CodexHookTrust` (Codex's per-handler trust keys +
+  hashes, read-only) + `MiniTOML` (reads `config.toml`), `PermissionBroker` (blocking PermissionRequest flow +
   allow-all memory + per-host `mayBlock`), `PermissionRules` (skip calls Claude Code auto-approves +
   trusted commands), `AppPresence` (GUI liveness beacon the blocking hook checks), `ProcTree` (owner pid +
   host; honours `CLAUDE_CODE_ENTRYPOINT`).
@@ -86,7 +96,7 @@ with any change here.
 - **Usage:** `UsageProvider` (ccusage `session` / `daily [--by-agent]`; the join key is `period`).
 - **Remote hosts (SSH, opt-in):** `RemoteHosts`, `RemoteExec` (the only place that runs `ssh`),
   `RemoteTranscriptPoller`, `RemotePermissionRelay`, `RemoteHooksInstaller` + `RemoteHookShim`,
-  `RemoteHostsView`.
+  `RemoteHostsView` (the Settings › SSH page + the add-host form). Claude Code only — no remote Codex.
 - **Updates (Sparkle 2.10, GUI only):** `UpdateModel` (the contract — `UpdateAvailability`, `UpdateMode`,
   `UpdateInfo`, `UpdateRequirement`, `UpdateFailure`, `UpdatePhase`; no `import Sparkle`, so no view
   depends on a Sparkle type), `AppUpdater` (the owner: launch gates → `availability`, modes + persistence,
@@ -98,12 +108,18 @@ with any change here.
   processes never create the updater, but dyld still loads Sparkle.framework into every one of them:
   measured at about +1.1 ms per hook spawn, ~0.77 ms of it loading Sparkle.framework.
 - **UI:** `FloatingWidgetController` (the floating light + management panel), `LightTowerView`,
-  `PermissionRibbonView`, `FloatingPanelView` (panel: chats by status or by product, settings),
+  `PermissionRibbonView`, `FloatingPanelView` (panel: header, chats by status or by product, footer),
+  Settings — `SettingsNavigation` (tabs Appearance / Notifications / Agents / SSH / General + their
+  sub-screens; a pure value type, self-tested), `SettingsScreen` (tab strip, page transitions, the shared
+  settings rows; a fixed height so tab switches never resize the panel), `SettingsPages` (the pages and
+  sub-screens), `AgentSettingsSections` (the Agents page's "Claude Code" and "Codex" sections),
   `StatusItemController` (menu-bar item), `WidgetQuickSettings`, `WidgetSettings`, `SessionBadges`
   (agent badge, host glyph, child rows), `HistoryView`, `UIHelpers`, `DesignTokens`, `App` / `AppDelegate`.
 - **Localization:** `Localization.swift` (`Loc` resolver, `L`/`Lf`/`Lcount`/`Lplural`, `LocalizationManager`);
   strings in `Resources/Localizable.xcstrings`. See the localization rules below.
 - **Diagnostics:** `Diagnostic`, `CodexDiagnostic`, `Log` (file + console logging shared by every process).
+- **Tests:** `SelfTest` (the `--self-test` runner) + `SelfTestsCodex`, `SelfTestsAgents`, `SelfTestsSettings` (its suites);
+  `Scripts/test/codex_hooks_e2e.py` (end-to-end, against a built binary).
 
 ## 🌐 Localization — NEVER hardcode UI text
 
@@ -136,7 +152,18 @@ language so you can confirm resolution headlessly, without the GUI.
 
 ## How to verify changes
 
-There is **no XCTest suite**. Verification = compile check + the headless diagnostic CLI.
+There is **no XCTest suite**. Verification = compile check + the built-in tests + the headless diagnostic
+CLI.
+
+- **Tests** (after a compile check, against the throwaway build):
+  - `ccemaphore --self-test [filter]` — unit tests of the pure logic (rollout reading, the Codex trust model
+    with hash vectors taken from the real Codex, config.toml reading, the hooks.json installer, the hook
+    overlay). Temp files only; exit 1 on a failure. Add a suite in a `SelfTests*.swift` file (registered in
+    `SelfTest.allSuites`) with every logic change.
+  - `python3 -I Scripts/test/codex_hooks_e2e.py --binary <…/ccemaphore.app/Contents/MacOS/ccemaphore>` —
+    end-to-end: our installer vs the REAL Codex app-server's `hooks/list` / `config/batchWrite` on an
+    isolated CODEX_HOME (skipped without ChatGPT.app), then the light through `--codex-watch` on a fixture
+    `~/.codex` + status dir. Temp dirs only; nothing launched but the CLI.
 
 - **Compile check** — build into a *throwaway* derived-data path, then clean it up (see rule 2 below).
   Point SwiftPM at a persistent checkout cache so each throwaway build reuses the pinned Sparkle instead of
@@ -158,7 +185,11 @@ There is **no XCTest suite**. Verification = compile check + the headless diagno
   - `ccemaphore --hooks-status` / `--install-hooks` / `--uninstall-hooks`.
   - `ccemaphore --registry-dump` — Claude Code's live session registry as the engine reads it.
   - `ccemaphore --codex-scan` / `--codex-probe <rollout.jsonl>` / `--codex-db-probe` — the Codex side.
-  - `ccemaphore --codex-hooks-status` / `--install-codex-hooks` / `--uninstall-codex-hooks`.
+  - `ccemaphore --codex-watch [seconds]` — track Codex sessions live exactly as the app does (FSEvents + the
+    growth poll + the tick, hook records folded in) and print every state change (`CCEMAPHORE_CODEX_HOME` +
+    `CCEMAPHORE_STATUS_DIR` point it at fixtures).
+  - `ccemaphore --codex-hooks-status` (install state + Codex's verdict per hook: key, our hash, the recorded
+    one, last hook record) / `--install-codex-hooks` / `--uninstall-codex-hooks`.
   - `ccemaphore --groups-dump` — product groups (manual + Codex projects).
   - `ccemaphore --usage-dump` — run ccusage once; per-day totals with the Claude/Codex split + Codex join keys.
   - `ccemaphore --update-status` — the updater as this copy sees it, local checks only (no network, no
@@ -174,7 +205,8 @@ There is **no XCTest suite**. Verification = compile check + the headless diagno
     `--relaunch-watchdog <pid> <bundle> <install|restart> --dry-run` only reports what it would do.
   - Test seams: `CCEMAPHORE_SETTINGS_PATH` (Claude settings.json), `CCEMAPHORE_CODEX_HOOKS_PATH` +
     `CCEMAPHORE_CODEX_CONFIG_PATH` (Codex hooks.json / config.toml), `CCEMAPHORE_CODEX_HOME` (a fixture
-    `~/.codex`), `CCEMAPHORE_REGISTRY_DIR` (a fixture `~/.claude/sessions`), `CCEMAPHORE_BASE_DIR`.
+    `~/.codex`), `CCEMAPHORE_REGISTRY_DIR` (a fixture `~/.claude/sessions`), `CCEMAPHORE_STATUS_DIR` (a
+    fixture `~/.claude/status`), `CCEMAPHORE_LOG_DIR`, `CCEMAPHORE_BASE_DIR`.
   - New Swift files must be registered in `ccemaphore.xcodeproj/project.pbxproj` by hand (explicit file
     refs, no synchronized groups). Mirror an existing file such as `UpdateModel.swift`: a
     `PBXFileReference`, a `PBXBuildFile` pointing at it, the reference in the `ccemaphore` group's

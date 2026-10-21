@@ -60,9 +60,11 @@ zusammen – damit du nie das Fenster wechseln musst, nur um den Status zu prüf
   IDE, Terminal, ChatGPT-App). **Chat öffnen** – oder ein Klick auf die Zeile des Chats im Panel – öffnet
   den richtigen Ort: den Cursor-Tab, die Sitzung in der Claude-App oder den Codex-Thread.
 - **Unteragenten.** Ein Chat mit Unteragenten (Claude-`Task`-Agenten, Workflows, Codex-Unterthreads)
-  bekommt ein Chevron – ausklappen und sehen, was jeder gerade tut.
+  bekommt ein Chevron. Ausgeklappt sieht jeder Unteragent bei beiden Agenten gleich aus: wofür er da ist
+  (Aufgabenbeschreibung bei Claude, Aufgabenname bei Codex), wer er ist (Agententyp, Codex-Spitzname)
+  und, solange er arbeitet, was er gerade tut – welche Datei er liest, welchen Befehl er ausführt.
 - **Nach Produkt gruppieren.** Backend, Frontend und Landing eines Produkts gleichzeitig? Wähle
-  **Nach Produkt** unter **Einstellungen ▸ Produktgruppen**: Der Chats-Tab gruppiert die Chats dann nach
+  **Nach Produkt** unter **Einstellungen ▸ Ansicht** (die Ordner liegen eine Ebene tiefer, in **Produktgruppen**): Der Chats-Tab gruppiert die Chats dann nach
   Produktordner (`Produkt › Unter-Repo`); ChatGPT-App-Projekte und Ordner mit mehreren Repos werden
   automatisch vorgeschlagen.
 - **Codex-Limits.** Die 5-Stunden- / Wochenfenster, die Codex meldet, am Ende des Chats-Tabs.
@@ -76,7 +78,7 @@ Token- und Kostenstatistiken pro Sitzung sowie ein Tagesverlauf-Fenster stammen 
 ## Sprachen
 
 ccemaphore ist vollständig lokalisiert in **English, Русский, Español, Deutsch, Français**, mit
-**Live**-Umschaltung – ohne Neustart. Öffne **Einstellungen ▸ Sprache** und wähle eine aus dem Menü
+**Live**-Umschaltung – ohne Neustart. Öffne **Einstellungen ▸ Allgemein ▸ Sprache** und wähle eine aus dem Menü
 (jede zeigt ihren eigenen Namen und ihre Flagge); die gesamte Oberfläche wird sofort neu gezeichnet.
 Belasse es auf **System**, um den bevorzugten Sprachen von macOS zu folgen (mit Rückfall auf Englisch).
 
@@ -93,13 +95,13 @@ Nur Folgendes geht ins Netz:
 
 - **Update-Prüfung → GitHub.** Sofern du Updates nicht ausschaltest, fragt ccemaphore einmal täglich bei
   GitHub nach einer neuen Version und lädt sie von dort. GitHub sieht deine IP-Adresse, die App-Version
-  (im User-Agent, z. B. `ccemaphore/1.3.0 Sparkle/2.10.0`) und deine bevorzugte Sprache (den
+  (im User-Agent, z. B. `ccemaphore/1.3.1 Sparkle/2.10.0`) und deine bevorzugte Sprache (den
   `Accept-Language`-Header, den macOS hinzufügt). Jede Prüfung erhöht außerdem den öffentlichen
   Download-Zähler der `appcast.xml` des Releases – eine einzige Gesamtzahl, die jeder sehen kann und die
   nichts über dich verrät. Cookies werden nicht gespeichert, und es wird kein Systemprofil gesendet.
 - **Du entscheidest.** Beim ersten Start fragt das Panel, wie aktualisiert werden soll – automatisch, nur
   benachrichtigen oder aus –, und vor deiner Antwort läuft keine automatische Prüfung. Ändern kannst du
-  das jederzeit unter **Einstellungen ▸ Updates**; sind Updates aus, prüft ccemaphore nie von selbst
+  das jederzeit unter **Einstellungen ▸ Allgemein ▸ Updates**; sind Updates aus, prüft ccemaphore nie von selbst
   (manuell prüfen geht weiterhin).
 - **ccusage** (Token- und Kostenstatistik, nur wenn Node oder Bun installiert ist) läuft über
   `bunx`/`npx`, die das Paket aus der npm-Registry laden können; ccusage selbst kann aktuelle
@@ -159,16 +161,22 @@ umkehrbar.
 
 Existiert `~/.codex`, beobachtet ccemaphore auch Codex: die Thread-Transkripte
 (`~/.codex/sessions/**/rollout-*.jsonl` – `task_started` / `task_complete` / `turn_aborted` liefern
-arbeitet / fertig), den Thread-Katalog (`state_5.sqlite`, nur lesend geöffnet – Titel, Ordner, Projekte,
-Archivstatus) und die Schreibsperren pro Thread (gehalten, solange die ChatGPT-App den Thread offen hat).
-Freigabeanfragen schreibt Codex nicht in seine Transkripte, daher kommt „braucht dich“ für Codex nur über
-Hooks: **Präziser Status über Codex-Hooks** schreibt die Hooks von ccemaphore in `~/.codex/hooks.json`,
-und der separate Schalter **Codex-Berechtigungsabfragen** macht aus einer Freigabeanfrage rotes Licht +
-Band (vertrauenswürdige Befehle werden automatisch erlaubt). Codex führt nur Hooks aus, denen es
-**vertraut**: Genehmige `hooks.json` nach der Installation einmal in der ChatGPT-App
-(Codex-Einstellungen → Hooks) oder mit `/hooks` in der Codex-CLI – die Zeile in den Einstellungen zeigt
-dir den Stand. Ein Thread, den die ChatGPT-App aus Claude Code *importiert* hat, behält sein
-Claude-Badge; ein reiner Spiegel ohne Codex-Züge wird ausgeblendet, damit nichts doppelt erscheint.
+arbeitet / fertig; solange ein Thread läuft, hält Codex sein Transkript offen, daher prüft ccemaphore die
+offenen Transkripte alle 1,5 s auf neue Zeilen), den Thread-Katalog (`state_5.sqlite`, nur lesend
+geöffnet – Titel, Ordner, Projekte, Archivstatus) und die Schreibsperren pro Thread (gehalten, solange
+die ChatGPT-App den Thread offen hat). Freigabeanfragen schreibt Codex nicht in seine Transkripte, daher
+kommt „braucht dich“ für Codex über Hooks: **Präzise Statuserkennung** im Abschnitt **Codex** fügt
+`~/.codex/hooks.json` fünf kleine Hooks hinzu – rotes Licht, solange Codex auf deine Freigabe wartet
+(auch in einem Unteragenten: dessen Chat wird rot; nicht bei der automatischen Prüfung von Codex, wo
+niemand gefragt wird – und nach der Freigabe eines langen Befehls, bis er fertig ist), der Hinweis bei
+Kontextkomprimierung und ein Zurücksetzen, wenn ein Zug endet; arbeitet / fertig kommt weiterhin aus den
+Transkripten. Codex führt einen Hook erst aus, wenn du ihn **freigibst**: Öffne einen Codex-Chat und
+klicke im Eingabefeld auf **Hooks prüfen** (oder führe `/hooks` in der Codex-CLI aus). Die Zeile in den
+Einstellungen zeigt den Stand – Freigabe ausstehend, freigegeben, wann ein Hook zuletzt lief – und öffnet
+dir die ChatGPT-App. Befehle aus deiner Liste vertrauenswürdiger Befehle werden auch hier ohne Abfrage
+erlaubt. Deine eigenen Hooks in `hooks.json` bleiben erhalten. Ein Thread, den die ChatGPT-App aus Claude
+Code *importiert* hat, behält sein Claude-Badge; ein reiner Spiegel ohne Codex-Züge wird ausgeblendet,
+damit nichts doppelt erscheint.
 
 ## Installation
 
@@ -187,12 +195,12 @@ Claude-Badge; ein reiner Spiegel ohne Codex-Züge wird ausgeblendet, damit nicht
   mit Remote-SSH nach vorne zu holen, statt ein neues zu öffnen.
 - **Wähle, wie ccemaphore sich aktualisiert** – das Panel fragt einmal: automatisch, nur benachrichtigen
   oder aus ([Details ↓](#updates)).
-- **Aktiviere „Präzise Statuserkennung“** in den Einstellungen, um Modus B (Hooks + Freigabe-Band) zu
-  aktivieren.
-- **Nutzt du Codex in der ChatGPT-App?** Es wird automatisch erkannt. Für sofortiges „fertig“ / „braucht
-  dich“ schalte **Präziser Status über Codex-Hooks** (und **Codex-Berechtigungsabfragen**) ein und
-  genehmige die Hooks einmal in den Codex-Einstellungen der ChatGPT-App – die Zeile zeigt, sobald sie
-  vertraut sind.
+- **Aktiviere „Präzise Statuserkennung“** unter **Einstellungen ▸ Agenten ▸ Claude Code**, um Modus B (Hooks +
+  Freigabe-Band) zu aktivieren.
+- **Nutzt du Codex in der ChatGPT-App?** Es wird automatisch erkannt. Um zu sehen, wann Codex auf deine
+  Freigabe wartet, schalte **Präzise Statuserkennung** unter **Einstellungen ▸ Agenten ▸ Codex** ein und
+  klicke einmal im Eingabefeld eines Codex-Chats auf **Hooks prüfen** – die Zeile zeigt, sobald die Hooks
+  freigegeben sind.
 - **Beide Apps benachrichtigen dich auch selbst.** Reicht dir das Licht, schalte die Claude-App /
   ChatGPT-App unter Systemeinstellungen ▸ Mitteilungen oder in den Mitteilungseinstellungen der
   jeweiligen App stumm.
@@ -209,7 +217,7 @@ Claude-Badge; ein reiner Spiegel ohne Codex-Züge wird ausgeblendet, damit nicht
 
 ccemaphore hält sich mit [Sparkle](https://sparkle-project.org) selbst auf dem neuesten Stand:
 
-- **Drei Modi** – einmal beim ersten Start gewählt und jederzeit unter **Einstellungen ▸ Updates**
+- **Drei Modi** – einmal beim ersten Start gewählt und jederzeit unter **Einstellungen ▸ Allgemein ▸ Updates**
   änderbar (dort siehst du auch deine Version und die letzte Prüfung):
   - **Automatisch** – prüft einmal täglich und lädt im Hintergrund; ist die neue Version bereit, setzt
     ein einziger Klick auf **Neu starten** sie ein und startet die App neu. Auch normales Beenden
@@ -280,7 +288,7 @@ Dank an alle, die Funktionen zu ccemaphore beigetragen haben:
 
 Die In-App-Updates laufen mit [Sparkle](https://sparkle-project.org) (MIT-Lizenz). Seine Lizenz liegt
 zusammen mit den Hinweisen zum enthaltenen Fremdcode in der App (zu öffnen unter
-**Einstellungen ▸ Updates**) und in [`Resources/ThirdPartyNotices.txt`](Resources/ThirdPartyNotices.txt).
+**Einstellungen ▸ Allgemein ▸ Updates**) und in [`Resources/ThirdPartyNotices.txt`](Resources/ThirdPartyNotices.txt).
 
 ## Lizenz
 

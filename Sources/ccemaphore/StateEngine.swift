@@ -21,18 +21,25 @@ final class StateEngine: ObservableObject {
     /// note on screen follows a language switch.
     @Published private(set) var lastHookError: HookOpError?
 
-    /// Why the last hook install / uninstall didn't happen.
+    /// Why the last hook install / uninstall didn't happen, and whose hooks it was about — the note shows
+    /// under that agent's rows only.
     enum HookOpError {
         /// Refused: running from the mounted DMG / an App Translocation copy.
-        case blockedTransient
+        case blockedTransient(AgentKind)
         /// The `op.*` operation `opKey` threw `error`.
-        case failed(opKey: String, error: Error)
+        case failed(opKey: String, agent: AgentKind, error: Error)
+
+        var agent: AgentKind {
+            switch self {
+            case .blockedTransient(let agent), .failed(_, let agent, _): agent
+            }
+        }
 
         /// The panel text in the current language (a system error's own text follows the macOS language).
         var message: String {
             switch self {
             case .blockedTransient: return L("settings.hooks.blockedTransient")
-            case .failed(let opKey, let error): return Lf("error.hookOp", L(opKey), error.localizedDescription)
+            case .failed(let opKey, _, let error): return Lf("error.hookOp", L(opKey), error.localizedDescription)
             }
         }
     }
@@ -79,12 +86,15 @@ final class StateEngine: ObservableObject {
     @Published private(set) var codexProjects: [CodexProject] = []
     /// Live (pid-alive) entries in Claude Code's session registry — the diagnostics row's count.
     @Published private(set) var registryLiveCount = 0
-    /// Codex hooks (`~/.codex/hooks.json`): installed / permission hook / Codex's trust verdict for the
-    /// current file bytes (see `CodexHooksInstaller.trustState`). Trust is re-read on the tick because the
-    /// user grants it inside the ChatGPT app, outside our process.
-    @Published private(set) var codexHooksInstalled = false
-    @Published private(set) var codexPermissionHookInstalled = false
-    @Published private(set) var codexHooksTrust: CodexHooksInstaller.TrustState = .notInstalled
+    /// Codex hooks (`~/.codex/hooks.json`): install state + Codex's per-handler trust verdict (see
+    /// `CodexHookTrust`). Re-read on the tick (only when hooks.json / config.toml changed) because the user
+    /// grants trust inside the ChatGPT app, outside our process.
+    @Published private(set) var codexHooks = CodexHooksStatus.notInstalled
+    /// When a Codex hook last wrote a status record — proof Codex actually RUNS the approved hooks (the
+    /// desktop app has been known to skip them). Persisted, because status files are swept after a while.
+    @Published private(set) var codexHooksLastSignal: Date? =
+        UserDefaults.standard.object(forKey: StateEngine.codexLastSignalKey) as? Date
+    private static let codexLastSignalKey = "codex.hooks.lastSignal"
     /// Effective product groups (manual ∪ Codex projects ∪ auto), recomputed on every render from the
     /// live session set; `manualGroups` is the user-edited subset the settings list shows with ✕.
     @Published private(set) var productGroups: [ProductGroup] = []
@@ -92,8 +102,9 @@ final class StateEngine: ObservableObject {
 
     private let store = SessionStore()
     private let codexStore = CodexSessionStore()
-    /// Latest Codex snapshot (mode A for Codex), folded into `render()` under `codex:<id>` keys.
-    private var codexSessions: [SessionInfo] = []
+    /// Latest Codex snapshot (mode A for Codex), folded into `render()` under `codex:<id>` keys together
+    /// with the Codex hook records (`CodexHookOverlay`).
+    private var codexSnapshot = CodexSnapshot()
     /// Each source has completed its first full scan. `render()` prunes the remembered expanded-row set
     /// only after that: the launch-time renders triggered by the status/registry refreshes run BEFORE the
     /// transcript ingest lands and would otherwise wipe the persisted set on every launch.
@@ -104,6 +115,7 @@ final class StateEngine: ObservableObject {
     private var registryWatcher: TranscriptWatcher?
     private var codexWatcher: TranscriptWatcher?
     private var codexLockWatcher: TranscriptWatcher?
+    private var codexPollTimer: Timer?
     private let usage = UsageProvider()
     private let remotePoller = RemoteTranscriptPoller()
     private let remotePermissionRelay = RemotePermissionRelay()
@@ -272,7 +284,7 @@ final class StateEngine: ObservableObject {
         // Self-heal the Codex hook commands too (binary moved) — refresh-only, and only when installed,
         // because any byte changed in hooks.json makes Codex ask the user to trust it again. Never from a
         // transient location (see the Claude heal above).
-        if (codexHooksInstalled || codexPermissionHookInstalled) && !transientLocation {
+        if codexHooks.isInstalled && !transientLocation {
             Task { @MainActor in
                 do { try CodexHooksInstaller.healInstalled() }
                 catch { Log.codex.warn("codex hook self-heal skipped: \(error.localizedDescription)") }
@@ -432,7 +444,10 @@ final class StateEngine: ObservableObject {
         // cheap — and it's what notices a pid that died without Claude Code reaping its file.
         registry = await Task.detached { SessionRegistryReader.readAll() }.value
         registryLiveCount = registry.count
-        if codexWatcher != nil { codexSessions = await codexStore.reevaluate(now: Date()) }
+        if codexWatcher != nil {
+            let s = await codexStore.reevaluate(now: Date())
+            if codexWatcher != nil { codexSnapshot = s }
+        }
         apply(await store.reevaluate(now: Date()))
     }
 
@@ -448,7 +463,8 @@ final class StateEngine: ObservableObject {
     }
 
     /// Recomputed only when hooks.json or config.toml actually changed (mtime+size stamp), so the 5 s tick
-    /// costs two stat() calls, not re-parsing both files plus a SHA-256. Publishes only on change.
+    /// costs two stat() calls, not re-parsing both files and re-hashing every handler. Publishes only on
+    /// change.
     private var codexHookFilesStamp: String?
     private func refreshCodexHookState(force: Bool = false) {
         let stamp = [CodexHooksInstaller.hooksPath, CodexHooksInstaller.configPath].map { path -> String in
@@ -458,29 +474,29 @@ final class StateEngine: ObservableObject {
         }.joined(separator: "|")
         guard force || stamp != codexHookFilesStamp else { return }
         codexHookFilesStamp = stamp
-        let installed = CodexHooksInstaller.isInstalled()
-        let perm = CodexHooksInstaller.isPermissionHookInstalled()
-        let trust = CodexHooksInstaller.trustState()
-        if installed != codexHooksInstalled { codexHooksInstalled = installed }
-        if perm != codexPermissionHookInstalled { codexPermissionHookInstalled = perm }
-        if trust != codexHooksTrust {
-            Log.codex.info("codex hooks trust: \(codexHooksTrust) → \(trust)")
-            codexHooksTrust = trust
+        let status = CodexHooksInstaller.status()
+        guard status != codexHooks else { return }
+        if status.summary != codexHooks.summary {
+            Log.codex.info("codex hooks: \(String(describing: codexHooks.summary)) → \(String(describing: status.summary))")
         }
+        codexHooks = status
+    }
+
+    /// Advance `codexHooksLastSignal` from the freshest Codex hook record (never backwards).
+    private func noteCodexHookSignal() {
+        guard let latest = statusBySession.values.filter({ $0.agent == .codex }).map(\.updatedAt).max(),
+              latest > (codexHooksLastSignal ?? .distantPast) else { return }
+        codexHooksLastSignal = latest
+        UserDefaults.standard.set(latest, forKey: Self.codexLastSignalKey)
     }
 
     // MARK: - Codex hooks (install/remove in ~/.codex/hooks.json)
 
     func installCodexHooks() {
-        guard !refuseHookInstallFromTransientLocation("op.installCodexHooks") else { return }
-        runHookOp("op.installCodexHooks") { try CodexHooksInstaller.install() }
+        guard !refuseHookInstallFromTransientLocation("op.installCodexHooks", agent: .codex) else { return }
+        runHookOp("op.installCodexHooks", agent: .codex) { try CodexHooksInstaller.install() }
     }
-    func uninstallCodexHooks() { runHookOp("op.uninstallCodexHooks") { try CodexHooksInstaller.uninstall() } }
-    func installCodexPermissionHook() {
-        guard !refuseHookInstallFromTransientLocation("op.installCodexPermission") else { return }
-        runHookOp("op.installCodexPermission") { try CodexHooksInstaller.installPermissionHook() }
-    }
-    func uninstallCodexPermissionHook() { runHookOp("op.uninstallCodexPermission") { try CodexHooksInstaller.uninstallPermissionHook() } }
+    func uninstallCodexHooks() { runHookOp("op.uninstallCodexHooks", agent: .codex) { try CodexHooksInstaller.uninstall() } }
 
     private func refreshRegistry() async {
         registry = await Task.detached { SessionRegistryReader.readAll() }.value
@@ -512,13 +528,20 @@ final class StateEngine: ObservableObject {
         }
         lw.start()
         codexLockWatcher = lw
+        // The sessions-tree watcher only sees rollouts being CREATED: Codex holds a loaded thread's rollout
+        // open, and FSEvents stays silent about its appends until it is closed (see `CodexSessionStore.poll`).
+        codexPollTimer = Timer.scheduledTimer(withTimeInterval: Tuning.codexPoll, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.pollCodex() }
+        }
         Log.codex.info("codex watch started (home=\(CodexPaths.home))")
     }
 
     private func stopCodex() {
         codexWatcher?.stop(); codexWatcher = nil
         codexLockWatcher?.stop(); codexLockWatcher = nil
-        codexSessions = []
+        codexPollTimer?.invalidate(); codexPollTimer = nil
+        codexSnapshot = CodexSnapshot()
         codexProjects = []   // Codex-sourced product groups go with it
         render()
         Log.codex.info("codex watch stopped")
@@ -530,13 +553,26 @@ final class StateEngine: ObservableObject {
         if on { refreshCodexPresence(); startCodexIfEnabled() } else { stopCodex() }
     }
 
+    // Each of these re-checks `codexWatcher` AFTER its await: a pass already queued on the store when Codex
+    // was switched off must not bring the cleared rows back (nothing would clear them again).
+
     private func handleCodex(_ paths: [String]) async {
-        codexSessions = await codexStore.ingest(paths: paths, now: Date())
+        let s = await codexStore.ingest(paths: paths, now: Date())
+        guard codexWatcher != nil else { return }
+        codexSnapshot = s
+        render()
+    }
+
+    private func pollCodex() async {
+        guard let s = await codexStore.poll(now: Date()), codexWatcher != nil else { return }
+        codexSnapshot = s
         render()
     }
 
     private func rescanCodex(render doRender: Bool) async {
-        codexSessions = await codexStore.rescan(now: Date())
+        let s = await codexStore.rescan(now: Date())
+        guard codexWatcher != nil else { return }
+        codexSnapshot = s
         firstCodexScanDone = true
         codexProjects = await codexStore.knownProjects
         if doRender { render() }
@@ -562,6 +598,7 @@ final class StateEngine: ObservableObject {
 
     private func refreshStatus() async {
         statusBySession = await Task.detached { StatusReader.readAll() }.value
+        noteCodexHookSignal()
         render()
     }
 
@@ -726,14 +763,21 @@ final class StateEngine: ObservableObject {
         for hostSessions in remotePoller.lastSessions.values {
             for (id, s) in hostSessions { byId[id] = s }
         }
-        // Codex threads (mode A over ~/.codex) — `codex:<thread_id>` keys, disjoint by construction.
-        for s in codexSessions { byId[s.id] = s }
+        // Codex threads (mode A over ~/.codex) with their own hook records folded in by Codex's rules
+        // (`CodexHookOverlay`: hooks add waiting / compacting, the rollout owns working / done) —
+        // `codex:<thread_id>` keys, disjoint by construction.
+        let allStatus = mergedStatus
+        let codexStatus = allStatus.filter { SessionInfo.parseCodexID($0.key) != nil }
+        for s in CodexHookOverlay.apply(codexSnapshot, status: codexStatus, now: now, staleWindow: staleWindow) {
+            byId[s.id] = s
+        }
 
         // Local hook status folded with every reachable remote host's status. Iterating THIS merged map
         // instead of `statusBySession` IS the remote-normalization: a remote session now goes through the
         // identical merge below (suppressDone / demote / native-wait / compacting), while local sessions
-        // resolve to exactly the same entries as before (remote keys are namespaced, disjoint).
-        let status = mergedStatus
+        // resolve to exactly the same entries as before (remote keys are namespaced, disjoint). Codex
+        // records are left out of every rule below — the overlay above has already applied them.
+        let status = allStatus.filter { SessionInfo.parseCodexID($0.key) == nil }
         for (id, st) in status {
             guard now.timeIntervalSince(st.updatedAt) <= staleWindow else { continue }
             // The permission broker writes `waiting` only while a request is actually pending. If its
@@ -768,14 +812,11 @@ final class StateEngine: ObservableObject {
                     a.lastActivity = st.updatedAt
                 }
                 byId[id] = a
-            } else if SessionInfo.parseCodexID(id) == nil {
+            } else {
                 // A status file with no matching session yet (transcript not tailed) still surfaces the
                 // chat; carry `remoteHostId` so a remote-only chat is tagged correctly (offline / pid-reap
-                // exclusion / deep-link) instead of looking local.
-                // A CODEX status file never creates a row on its own: the Codex store owns a thread's
-                // listing (a finished, closed thread drops at once by design), so a hook record only
-                // overlays a row that exists — otherwise a `codex-<id>.json` left by `stop` would
-                // resurrect the thread as a Claude-badged row for the whole stale window.
+                // exclusion / deep-link) instead of looking local. (Codex records never get here — the
+                // Codex store owns a thread's listing, see the overlay above.)
                 byId[id] = SessionInfo(id: id, project: st.project, cwd: st.cwd, gitBranch: nil,
                                        title: nil, state: hookState, lastActivity: st.updatedAt,
                                        remoteHostId: st.remoteHostId)
@@ -930,7 +971,7 @@ final class StateEngine: ObservableObject {
         // Log per-session state transitions with their raw inputs BEFORE `manageCompletions` rolls
         // `lastDisplayState` forward — this is the signal that was missing when the question-native /
         // permission flap was diagnosed only from aggregate-color churn. Reads the previous snapshot.
-        logStateTransitions(status: status)
+        logStateTransitions(status: allStatus)
 
         // Attention items: red chats parked on a native prompt (`permission-native`/`question-native`),
         // whose fresh status carries that event and which have NO live pending request (those get the
@@ -1053,7 +1094,7 @@ final class StateEngine: ObservableObject {
             return (e.host, bundle, e.hostSessionId)
         }
         if SessionInfo.parseCodexID(sessionId) != nil {
-            let s = codexSessions.first { $0.id == sessionId }
+            let s = codexSnapshot.sessions.first { $0.id == sessionId }
             return (s?.host ?? .codexApp, s?.hostBundleId ?? DeepLinker.codexAppBundleId, nil)
         }
         // Merged so a remote session (namespaced id) resolves too — DeepLinker forks on `remoteHostId`
@@ -1065,25 +1106,25 @@ final class StateEngine: ObservableObject {
     // MARK: - Hooks (mode B install/remove)
 
     func installHooks() {
-        guard !refuseHookInstallFromTransientLocation("op.installHooks") else { return }
-        runHookOp("op.installHooks") { try HooksInstaller.install() }
+        guard !refuseHookInstallFromTransientLocation("op.installHooks", agent: .claude) else { return }
+        runHookOp("op.installHooks", agent: .claude) { try HooksInstaller.install() }
     }
-    func uninstallHooks() { runHookOp("op.uninstallHooks") { try HooksInstaller.uninstall() } }
+    func uninstallHooks() { runHookOp("op.uninstallHooks", agent: .claude) { try HooksInstaller.uninstall() } }
     func installPermissionHook() {
-        guard !refuseHookInstallFromTransientLocation("op.installPermission") else { return }
-        runHookOp("op.installPermission") { try HooksInstaller.installPermissionHook() }
+        guard !refuseHookInstallFromTransientLocation("op.installPermission", agent: .claude) else { return }
+        runHookOp("op.installPermission", agent: .claude) { try HooksInstaller.installPermissionHook() }
     }
 
     /// Installing from the mounted DMG / an App Translocation copy would bake a path into settings.json
     /// (or hooks.json) that disappears with the DMG — every hook would then fail. Refuse with a visible
     /// reason; uninstall stays allowed. True when refused.
-    private func refuseHookInstallFromTransientLocation(_ opKey: String) -> Bool {
+    private func refuseHookInstallFromTransientLocation(_ opKey: String, agent: AgentKind) -> Bool {
         guard UpdateSupport.isTransientLocation() else { return false }
-        lastHookError = .blockedTransient
+        lastHookError = .blockedTransient(agent)
         Log.settings.warn("hook op \(opKey) refused: running from a transient location (\(Bundle.main.bundlePath))")
         return true
     }
-    func uninstallPermissionHook() { runHookOp("op.uninstallPermission") { try HooksInstaller.uninstallPermissionHook() } }
+    func uninstallPermissionHook() { runHookOp("op.uninstallPermission", agent: .claude) { try HooksInstaller.uninstallPermissionHook() } }
 
     /// Prompt for Accessibility (opens the System Settings deep-link). Retained for the `--ax-dump`
     /// diagnostic / a future per-tab feature — no longer tied to notification suppression.
@@ -1265,13 +1306,14 @@ final class StateEngine: ObservableObject {
 
     /// Run a settings.json mutation and surface any failure (e.g. a malformed or unwritable file)
     /// instead of letting the menu button look like it silently did nothing.
-    private func runHookOp(_ opKey: String, _ op: () throws -> Void) {
+    private func runHookOp(_ opKey: String, agent: AgentKind, _ op: () throws -> Void) {
         do {
             try op()
-            lastHookError = nil
+            // A success clears only this agent's note: Claude working again says nothing about Codex.
+            if lastHookError?.agent == agent { lastHookError = nil }
             Log.settings.info("hook op \(opKey) ok")
         } catch {
-            lastHookError = .failed(opKey: opKey, error: error)
+            lastHookError = .failed(opKey: opKey, agent: agent, error: error)
             Log.settings.error("hook op \(opKey) failed: \(error.localizedDescription)")
         }
         hooksInstalled = HooksInstaller.isInstalled()

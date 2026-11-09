@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ServiceManagement
 
 // The Settings pages hosted by `SettingsScreen`: one root page per tab (Notifications and SSH have their own
 // files — `NotificationSettingsView`, `RemoteHostsView`) and the sub-screens the roots push. Each is its own
@@ -268,15 +269,18 @@ private struct RemoveButton: View {
 
 // MARK: - General
 
-/// Settings › General: the app itself — language, updates, diagnostics (logs).
+/// Settings › General: the app itself — language, open at login, updates, diagnostics (logs).
 struct GeneralSettingsPage: View {
     @ObservedObject var engine: StateEngine
     @ObservedObject private var loc = LocalizationManager.shared
+    /// macOS's own record, not a stored preference — the user can switch it off in System Settings.
+    @State private var loginStatus = SMAppService.mainApp.status
 
     var body: some View {
         VStack(spacing: 0) {
             languageRow
                 .padding(.top, 4)
+            loginItemRow
 
             SettingsSectionHeader(label: L("settings.updates.section"))
             UpdateSettingsSection(updater: .shared)
@@ -295,6 +299,55 @@ struct GeneralSettingsPage: View {
                 action: { LogExport.revealInFinder() }
             )
         }
+    }
+
+    private var loginItemRow: some View {
+        let blocker = Self.loginItemBlocker
+        return SettingsAppRow(
+            label: L("settings.launchAtLogin.title"),
+            subtitle: L(blocker ?? (loginStatus == .requiresApproval
+                                    ? "settings.launchAtLogin.approval" : "settings.launchAtLogin.subtitle")),
+            state: .onOff(loginStatus == .enabled),
+            enabled: blocker == nil,
+            action: toggleLoginItem
+        )
+        // The panel is reused across hide / show, so `onAppear` alone misses a change made in System
+        // Settings meanwhile; a window showing or hiding is rare and cheap to re-read on.
+        .onAppear { loginStatus = SMAppService.mainApp.status }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)) { _ in
+            loginStatus = SMAppService.mainApp.status
+        }
+    }
+
+    /// Why this copy may not become the login item (a localization key), or nil. `register()` records the
+    /// CALLING copy: a Debug / ad-hoc build would then start at login in place of the release (the
+    /// signature-keyed grants in CLAUDE.md), and a DMG / translocated one dangles once ejected or moved.
+    private static let loginItemBlocker: String? = {
+        #if DEBUG
+        return "settings.launchAtLogin.devBuild"
+        #else
+        if !UpdateSupport.isDeveloperIDSigned() { return "settings.launchAtLogin.devBuild" }
+        if UpdateSupport.isTransientLocation() { return "settings.launchAtLogin.needsMove" }
+        return nil
+        #endif
+    }()
+
+    private func toggleLoginItem() {
+        let service = SMAppService.mainApp
+        do {
+            switch service.status {
+            case .enabled: try service.unregister()
+            case .requiresApproval: SMAppService.openSystemSettingsLoginItems()
+            default:
+                try service.register()
+                // macOS may hold the item for the user's OK — take them straight to where they give it.
+                if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+            }
+        } catch {
+            Log.settings.warn("login item change failed (status \(service.status.rawValue)): \(error)")
+        }
+        loginStatus = service.status
+        Log.settings.info("login item status=\(loginStatus.rawValue)")
     }
 
     /// Single "Language" label + the current language (name · flag) as a trailing menu; clicking it opens

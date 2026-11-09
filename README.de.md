@@ -48,6 +48,7 @@ zusammen – damit du nie das Fenster wechseln musst, nur um den Status zu prüf
   aktualisiert die Liste.
 - **Ziehe** das Licht überallhin; schalte **Position fixieren** in den Einstellungen ein, um es dort
   festzusetzen.
+- **Beim Anmelden öffnen** unter **Einstellungen ▸ Allgemein** startet das Licht mit deinem Mac.
 - **Ein Chat braucht eine Freigabe?** Das Licht verwandelt sich direkt an Ort und Stelle in ein **Band**
   – **Erlauben / Ablehnen / Alle im Chat** (ab jetzt alles in diesem Chat erlauben), samt genauem Befehl –
   damit du ohne den Chat zu öffnen entscheidest.
@@ -95,7 +96,7 @@ Nur Folgendes geht ins Netz:
 
 - **Update-Prüfung → GitHub.** Sofern du Updates nicht ausschaltest, fragt ccemaphore einmal täglich bei
   GitHub nach einer neuen Version und lädt sie von dort. GitHub sieht deine IP-Adresse, die App-Version
-  (im User-Agent, z. B. `ccemaphore/1.3.1 Sparkle/2.10.0`) und deine bevorzugte Sprache (den
+  (im User-Agent, z. B. `ccemaphore/1.4.0 Sparkle/2.10.0`) und deine bevorzugte Sprache (den
   `Accept-Language`-Header, den macOS hinzufügt). Jede Prüfung erhöht außerdem den öffentlichen
   Download-Zähler der `appcast.xml` des Releases – eine einzige Gesamtzahl, die jeder sehen kann und die
   nichts über dich verrät. Cookies werden nicht gespeichert, und es wird kein Systemprofil gesendet.

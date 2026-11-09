@@ -49,6 +49,7 @@ en une seule couleur — pour que vous ne changiez jamais de fenêtre juste pour
   **Quitter** ; **↻** en haut actualise la liste.
 - **Faites glisser** la lumière où vous voulez ; activez **Fixer la position** dans les Réglages pour
   la verrouiller.
+- **Ouvrir à l'ouverture de session** dans **Réglages ▸ Général** lance la lumière avec votre Mac.
 - **Une conversation demande une autorisation ?** La lumière se transforme sur place en un **bandeau** —
   **Autoriser / Refuser / Tout dans le chat** (tout autoriser désormais dans cette conversation), avec la
   commande exacte — pour décider sans ouvrir la conversation.
@@ -100,7 +101,7 @@ Seuls ces éléments passent par le réseau :
 - **Vérification des mises à jour → GitHub.** Sauf si vous désactivez les mises à jour, ccemaphore
   demande une fois par jour à GitHub s'il existe une nouvelle version, et la télécharge depuis GitHub.
   GitHub voit votre adresse IP, la version de l'app (dans le User-Agent, p. ex.
-  `ccemaphore/1.3.1 Sparkle/2.10.0`) et votre langue préférée (l'en-tête `Accept-Language` qu'ajoute
+  `ccemaphore/1.4.0 Sparkle/2.10.0`) et votre langue préférée (l'en-tête `Accept-Language` qu'ajoute
   macOS). Chaque vérification incrémente aussi le compteur public de téléchargements du fichier
   `appcast.xml` de la version — un seul chiffre global, visible de tous, qui ne permet pas de vous
   identifier. Aucun cookie n'est conservé et aucun profil système n'est envoyé.

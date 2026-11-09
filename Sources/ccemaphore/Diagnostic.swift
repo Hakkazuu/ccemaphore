@@ -58,13 +58,13 @@ enum Diagnostic {
             for k in sampleKeys { print("  \(k) = \(L(k))") }
             print("  count.working(3) = \(Lf("count.working", 3))")
             print("  settings.registry.live(4) = \(Lf("settings.registry.live", 4))   back.a11y = \(Lf("settings.back.a11y", L("settings.tab.agents")))")
-            print("  update.available.title(1.3.1) = \(Lf("update.available.title", "1.3.1"))   menubar.update.restart(1.3.1) = \(Lf("menubar.update.restart", "1.3.1"))")
+            print("  update.available.title(1.4.0) = \(Lf("update.available.title", "1.4.0"))   menubar.update.restart(1.4.0) = \(Lf("menubar.update.restart", "1.4.0"))")
             print("  settings.updates.lastCheck(-2h) = \(Lf("settings.updates.lastCheck", Fmt.relative(Date().addingTimeInterval(-2 * 3600))))"
                   + "   (now) = \(Lf("settings.updates.lastCheck", Fmt.relative(Date())))")
             print("  update.incompatible.newerMacOS(1.4.0, 14.0) = \(Lf("update.incompatible.newerMacOS", "1.4.0", "14.0"))"
                   + "   appleSilicon(1.4.0) = \(Lf("update.incompatible.appleSilicon", "1.4.0"))")
             print("  update.incompatible.body(1.3.0) = \(Lf("update.incompatible.body", "1.3.0"))"
-                  + "   menubar.update.install(1.3.1) = \(Lf("menubar.update.install", "1.3.1"))")
+                  + "   menubar.update.install(1.4.0) = \(Lf("menubar.update.install", "1.4.0"))")
             for n in [1, 2, 5, 21, 22] {
                 print("  chats(\(n)) = \(Lcount("noun.chats", n))   days(\(n)) = \(Lcount("noun.days", n))   retention=\(Lcount("noun.daysShort", n))   subagents=\(Lcount("noun.subagents", n))")
             }
@@ -148,6 +148,12 @@ enum Diagnostic {
         await usage.refresh()
         let days = await usage.days
         let bySession = await usage.bySession
+        // A second pass takes the incremental path (`daily --since <yesterday>` merged into the cached rows):
+        // no day may vanish or shrink against the full read (today may grow while chats are active).
+        await usage.refresh()
+        let again = Dictionary(await usage.days.map { ($0.date, $0.totalTokens) }, uniquingKeysWith: { a, _ in a })
+        let broken = days.filter { (again[$0.date] ?? -1) < $0.totalTokens }.map(\.date)
+        print("incremental daily re-read: \(broken.isEmpty && again.count == days.count ? "OK" : "MISMATCH \(broken) count \(days.count)→\(again.count)")")
         let codexKeys = bySession.keys.filter { SessionInfo.parseCodexID($0) != nil }.sorted()
         func money(_ d: Double) -> String { String(format: "$%.2f", d) }
         print("ccusage sessions: \(bySession.count) (codex \(codexKeys.count))   days: \(days.count)")

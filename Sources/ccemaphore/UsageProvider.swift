@@ -18,36 +18,49 @@ actor UsageProvider {
     private(set) var bySession: [String: TokenUsage] = [:]
     private(set) var days: [DayStat] = []
     /// Resolved runner path last logged — so `refresh()` records the picked bunx/npx only when it
-    /// changes, not on every 45 s cycle.
+    /// changes, not on every cycle.
     private var lastRunnerPath: String?
     /// Whether this ccusage accepts `daily --by-agent` (the per-day Claude/Codex split): nil = still
     /// probing, true = works, false = rejected (an older ccusage exits non-zero on the unknown flag).
     /// A single failure proves nothing — two bunx runs started in the same instant have been seen to
     /// both exit 1 (cache-lock race) — so it takes `byAgentStrikesToLock` consecutive failures with a
     /// working plain report to lock, and a locked flag is re-probed every `byAgentReprobeEvery`
-    /// refreshes (≈ 30 min) so an upgraded ccusage is picked up without a relaunch.
+    /// refreshes so an upgraded ccusage is picked up without a relaunch.
     private var byAgentSupported: Bool?
     private var byAgentStrikes = 0
     private var refreshesSinceByAgentLock = 0
     private static let byAgentStrikesToLock = 3
     private static let byAgentReprobeEvery = 40
 
-    /// UUID → (mtime, resolved metadata). Lets each 45s refresh skip re-reading transcripts whose
+    /// UUID → (mtime, resolved metadata). Lets each refresh skip re-reading transcripts whose
     /// file hasn't changed; only the handful of active sessions are re-read per cycle.
     private struct MetaCacheEntry: Sendable { let mtime: Date; let meta: TranscriptMeta }
     private var metaCache: [String: MetaCacheEntry] = [:]
 
-    func refresh() async {
+    /// `ccusage daily` rows by period, kept across refreshes: a past day doesn't change, so after one full
+    /// read only `--since <yesterday>` is re-read and merged in (≈5× less CPU than the full history).
+    /// `session` can't be cut that way — `--since` truncates the totals of a session that began before the
+    /// cut-off (verified on ccusage 20.0.48: a weeks-long Codex thread 775M → 102M tokens).
+    private var dailyRows: [String: DailyEntry] = [:]
+    /// Whether `dailyRows` came from a full `--by-agent` read; once the flag works, a plain-only cache is
+    /// re-read in full so past days gain the Claude/Codex split too.
+    private var dailyRowsByAgent = false
+
+    /// `background`: run ccusage clamped to background QoS (E-cores, throttled I/O — about 6× slower wall
+    /// time) for refreshes nobody is waiting on; an interactive one (panel / History opened) runs at
+    /// normal priority so the numbers land in seconds. Returns whether both reports came back this round.
+    @discardableResult
+    func refresh(background: Bool = false) async -> Bool {
         guard let exe = Self.findRunner() else {
             Log.usage.warn("ccusage skipped: neither bunx nor npx found in PATH or known locations")
-            return
+            return false
         }
-        if exe.path != lastRunnerPath {   // log the resolved runner once, not every 45 s cycle
+        if exe.path != lastRunnerPath {   // log the resolved runner once, not every cycle
             lastRunnerPath = exe.path
             Log.usage.info("ccusage runner: \(exe.path)")
         }
         // Plain `ccusage` (not `ccusage@latest`): bunx/npx reuses the cached copy instead of doing a
-        // registry round-trip on every 45s refresh — faster, and it works offline once installed.
+        // registry round-trip on every refresh — faster, and it works offline once installed.
         // `--by-agent` adds the per-day Claude/Codex split; an older ccusage rejects it, so fall back
         // to the plain report and, after repeated rejections, stop asking for a while (see `byAgentSupported`).
         var tryByAgent = byAgentSupported != false
@@ -58,20 +71,22 @@ actor UsageProvider {
                 tryByAgent = true
             }
         }
-        let plainDaily = ["ccusage", "daily", "--json"]
-        async let dailyFirst = Self.run(exe, tryByAgent ? plainDaily + ["--by-agent"] : plainDaily)
-        async let sessionData = Self.run(exe, ["ccusage", "session", "--json"])
-
-        var dailyData = await dailyFirst
+        let fullDaily = dailyRows.isEmpty || (tryByAgent && !dailyRowsByAgent)
+        let sinceDay = Self.dayFormatter.string(from: Date().addingTimeInterval(-86_400))
+        let plainDaily = ["ccusage", "daily", "--json"] + (fullDaily ? [] : ["--since", sinceDay])
+        // One after the other: two bunx started together race on its package cache and both exit 1 (~1 in 4
+        // here), and each run peaks at 2+ GB RSS — so never two at once.
+        var dailyData = await Self.run(exe, tryByAgent ? plainDaily + ["--by-agent"] : plainDaily, background: background)
+        let sessionData = await Self.run(exe, ["ccusage", "session", "--json"], background: background)
         if tryByAgent {
             if dailyData != nil {
                 byAgentSupported = true
                 byAgentStrikes = 0
-            } else if await sessionData != nil {
+            } else if sessionData != nil {
                 // The runner itself works (the session report came back), so the FLAG is what failed —
                 // fall back to the plain report. With both calls dead (no ccusage at all) skip the third
-                // spawn: it would fail the same way, every 45 s.
-                dailyData = await Self.run(exe, plainDaily)
+                // spawn: it would fail the same way every cycle.
+                dailyData = await Self.run(exe, plainDaily, background: background)
                 // Count a strike only when the plain report worked in the same round — then the flag,
                 // not the runner, is what failed. A flag that has worked before never locks (transient).
                 if dailyData != nil, byAgentSupported != true {
@@ -91,7 +106,7 @@ actor UsageProvider {
         //    Agents ccemaphore doesn't track (ccusage also knows Gemini, OpenCode, …) are left out of the
         //    chat list — their tokens still count in the day totals.
         var keyed: [KeyedSession] = []
-        if let data = await sessionData {
+        if let data = sessionData {
             if let resp = try? JSONDecoder().decode(SessionResponse.self, from: data) {
                 keyed = resp.session.compactMap(KeyedSession.init)
                 bySession = Dictionary(keyed.map { ($0.key, $0.entry.usage) }, uniquingKeysWith: { a, _ in a })
@@ -142,19 +157,25 @@ actor UsageProvider {
         // 4) Days from `ccusage daily` (authoritative per-day totals + the agent split); attach the chat
         //    breakdown. A day present only via chats (no daily row) is synthesized from its chats so
         //    nothing hides.
-        var byDate: [String: DayStat] = [:]
-        var gotDaily = false
         if let data = dailyData {
             if let resp = try? JSONDecoder().decode(DailyResponse.self, from: data) {
-                gotDaily = true
-                for e in resp.daily {
-                    byDate[e.period] = DayStat(date: e.period, chatCount: 0,
-                                               totalTokens: e.totalTokens ?? 0, costUsd: e.totalCost ?? 0,
-                                               chats: [], byAgent: e.agentSplit)
+                if fullDaily {
+                    dailyRows = [:]
+                    dailyRowsByAgent = resp.daily.contains { $0.agents != nil }   // the fallback may have run plain
+                } else {
+                    dailyRows = dailyRows.filter { $0.key < sinceDay }   // re-read days replace the cached ones
                 }
+                for e in resp.daily { dailyRows[e.period] = e }
             } else {
                 Log.usage.warn("ccusage daily: unparseable output (\(data.count)B)")
             }
+        }
+        let gotDaily = !dailyRows.isEmpty
+        var byDate: [String: DayStat] = [:]
+        for e in dailyRows.values {
+            byDate[e.period] = DayStat(date: e.period, chatCount: 0,
+                                       totalTokens: e.totalTokens ?? 0, costUsd: e.totalCost ?? 0,
+                                       chats: [], byAgent: e.agentSplit)
         }
         for (day, chats) in dayChats {
             let sorted = chats.sorted { $0.tokens > $1.tokens }
@@ -174,10 +195,11 @@ actor UsageProvider {
         days = byDate.values.sorted { $0.date > $1.date }
 
         if gotDaily || !days.isEmpty {
-            Log.usage.info("ccusage refresh ok: sessions=\(bySession.count) (codex \(codexIds.count)) days=\(days.count) split=\(byAgentSupported == true)")
+            Log.usage.info("ccusage refresh ok (\(background ? "background" : "interactive"), daily \(fullDaily ? "full" : "since \(sinceDay)")): sessions=\(bySession.count) (codex \(codexIds.count)) days=\(days.count) split=\(byAgentSupported == true)")
         } else if bySession.isEmpty {
             Log.usage.warn("ccusage produced no parseable output (is ccusage installed for \(exe.lastPathComponent)?)")
         }
+        return dailyData != nil && sessionData != nil
     }
 
     /// Project + title for Codex threads, from Codex's own thread catalog (`state_5.sqlite`): the AI /
@@ -226,12 +248,22 @@ actor UsageProvider {
     /// the runner's process GROUP) terminates a hung runner after `timeout`, so even a node/bun
     /// grandchild still holding the stdout pipe is torn down and the read reliably reaches EOF — instead
     /// of leaving the continuation unresumed and this worker thread leaked forever.
-    private static func run(_ exe: URL, _ args: [String], timeout: TimeInterval = 30) async -> Data? {
-        await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+    private static func run(_ exe: URL, _ args: [String], background: Bool) async -> Data? {
+        // The background clamp stretches a full `session` read to ~35 s on E-cores — give it room.
+        let timeout: TimeInterval = background ? 180 : 30
+        return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
             DispatchQueue.global(qos: .utility).async {
                 let proc = Process()
-                proc.executableURL = exe
-                proc.arguments = args
+                // `taskpolicy -c background` execs the runner in place (same pid, so the process-group
+                // watchdog below still works) and the clamp is inherited by its node/bun → ccusage children.
+                let taskpolicy = "/usr/sbin/taskpolicy"
+                if background, FileManager.default.isExecutableFile(atPath: taskpolicy) {
+                    proc.executableURL = URL(fileURLWithPath: taskpolicy)
+                    proc.arguments = ["-c", "background", exe.path] + args
+                } else {
+                    proc.executableURL = exe
+                    proc.arguments = args
+                }
                 // GUI apps inherit a minimal PATH; augment it so the runner can find node/bun.
                 var env = ProcessInfo.processInfo.environment
                 let home = NSHomeDirectory()

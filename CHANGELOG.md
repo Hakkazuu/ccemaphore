@@ -5,6 +5,28 @@ All notable changes to **ccemaphore** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-11-10
+
+### Added
+- **Open at login.** A new switch in **Settings ▸ General** starts ccemaphore when you log in to your Mac.
+  It follows macOS's own Login Items record, so turning it off in System Settings unticks it here too;
+  if macOS asks for approval, a click opens Login Items. Available in the signed app once it's in
+  Applications.
+
+### Fixed
+- **The Mac no longer stutters in the background because of ccemaphore.** Token and cost stats re-read
+  the whole Claude Code and Codex history every 45 seconds, around the clock — about a core and a quarter
+  of CPU and 4–5 GB of memory churn even with nothing running. Now they refresh only after a chat has
+  actually done something: when you open the panel or History, and every few minutes in the background
+  while you work. Past days are read once and kept; only today and yesterday are re-read. Background
+  refreshes run on the efficiency cores at low priority, and never two at a time. On an idle Mac ccusage
+  no longer runs at all.
+- **A red light waiting for you no longer loads the system.** The urgent pulse used to loop for as long as
+  a request sat unanswered — for hours if you stepped away — keeping ccemaphore and WindowServer busy
+  redrawing it. It now pulses for a few seconds and stays solid red; each new request pulses again.
+- **Fewer wake-ups at rest.** The pointer is checked often only near the light or while the panel is
+  open, and not at all while the displays sleep or the screen is locked.
+
 ## [1.3.1] - 2026-10-21
 
 ### Fixed
@@ -189,6 +211,7 @@ Early patch releases following the initial launch. See the
     prompts, plus token/cost stats via `ccusage`.
 - Full localization: English, Русский, Español, Deutsch, Français.
 
+[1.4.0]: https://github.com/hakkazuu/ccemaphore/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/hakkazuu/ccemaphore/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/hakkazuu/ccemaphore/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/hakkazuu/ccemaphore/compare/v1.2.0...v1.2.1

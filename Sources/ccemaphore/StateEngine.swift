@@ -124,6 +124,10 @@ final class StateEngine: ObservableObject {
     private var pendingWatcher: TranscriptWatcher?
     private var stateTimer: Timer?
     private var usageTimer: Timer?
+    private var maintenanceTimer: Timer?
+    private var usageInFlight = false
+    /// When the last ccusage run began — the "anything new since?" watermark for `refreshUsageIfNeeded`.
+    private var usageStartedAt: Date?
     private var remotePollTimer: Timer?
     private var remotePendingTimer: Timer?
     /// Latest remote pending requests (all hosts), merged into `pendingRequests` on every render.
@@ -192,10 +196,10 @@ final class StateEngine: ObservableObject {
             firstClaudeScanDone = true
             apply(snap)
         }
-        Task { await refreshUsage() }
+        Task { await refreshUsage(background: true) }
         // Startup GC of stale broker + usage files left by a killed hook or an ended session, plus the
         // status dir (a killed window leaves a status file no reap/tombstone reclaimed). Both ALSO
-        // re-run on the slow usage cadence (see `refreshUsage` — together with the pending-set
+        // re-run on the maintenance cadence (see `maintenance` — together with the pending-set
         // reconciliation) so a long-lived GUI doesn't accumulate either.
         Task.detached { PermissionBroker.sweep() }
         Task.detached { HookHandler.sweepStale() }
@@ -297,10 +301,14 @@ final class StateEngine: ObservableObject {
             guard let self else { return }
             Task { await self.tick() }
         }
-        // ccusage is expensive — refresh on a slow cadence, never per FSEvents tick.
+        // ccusage is expensive — refresh on a slow cadence, only after real activity, never per FSEvents tick.
         usageTimer = Timer.scheduledTimer(withTimeInterval: Tuning.usageRefresh, repeats: true) { [weak self] _ in
             guard let self else { return }
-            Task { await self.refreshUsage() }
+            Task { await self.refreshUsageIfNeeded(background: true, minGap: 0) }
+        }
+        maintenanceTimer = Timer.scheduledTimer(withTimeInterval: Tuning.maintenanceTick, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.maintenance() }
         }
 
         // Remote hosts: no FSEvents/hook-file-watch equivalent across SSH, so both are polled on their own
@@ -412,8 +420,14 @@ final class StateEngine: ObservableObject {
             registryLiveCount = registry.count
             if codexWatcher != nil { await rescanCodex(render: false) }
             apply(await store.ingest(paths: SessionPath.enumerateTranscripts(root: root), now: Date()))
-            await refreshUsage()
+            await refreshUsage(background: false)
         }
+    }
+
+    /// The panel or the History window just opened: bring the token numbers up to date if chats have been
+    /// active since the last ccusage run (at normal priority — someone is looking at them).
+    func usageWanted() {
+        Task { await refreshUsageIfNeeded(background: false, minGap: Tuning.usageInteractiveGap) }
     }
 
     var workingCount: Int { sessions.filter { $0.state == .working }.count }
@@ -578,12 +592,31 @@ final class StateEngine: ObservableObject {
         if doRender { render() }
     }
 
-    private func refreshUsage() async {
-        await usage.refresh()
+    /// ccusage re-reads the whole history on every run, so skip it unless a local chat has been active
+    /// since the last run began — an idle machine never spawns it — and space runs at least `minGap` apart.
+    private func refreshUsageIfNeeded(background: Bool, minGap: TimeInterval) async {
+        if let last = usageStartedAt {
+            guard Date().timeIntervalSince(last) >= minGap,
+                  sessions.contains(where: { !$0.isRemote && $0.lastActivity > last }) else { return }
+        }
+        await refreshUsage(background: background)
+    }
+
+    private func refreshUsage(background: Bool) async {
+        guard !usageInFlight else { return }   // never stack a second multi-GB run on a running one
+        usageInFlight = true
+        defer { usageInFlight = false }
+        let previousStart = usageStartedAt
+        usageStartedAt = Date()
+        // A failed run covers nothing — keep the old watermark so the next trigger retries.
+        if !(await usage.refresh(background: background)) { usageStartedAt = previousStart }
         usageBySession = await usage.bySession
         days = await usage.days
         render()
-        // Piggyback the periodic status-dir GC on this slow cadence (off-actor) so ~/.claude/status
+    }
+
+    private func maintenance() async {
+        // Periodic status-dir GC on this slow cadence (off-actor) so ~/.claude/status
         // can't grow unbounded over a long-lived GUI (one file per Claude Code session/UUID), and the
         // broker-file GC (leftover .decision files / long-idle allow-all markers) alongside it.
         Task.detached { HookHandler.sweepStale() }

@@ -55,6 +55,8 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
 
     // Hover tracking (drives expand/collapse instead of clicks).
     private var hoverTimer: Timer?
+    /// Displays asleep / screen locked: the hover poll stays off (a tick already in flight must not re-arm it).
+    private var hoverPaused = false
     /// Observers for system events (display sleep/wake, active-Space switch, display reconfiguration)
     /// that can hide the expanded panel or pause the poll timer WITHOUT routing through our own
     /// collapse path — which used to strand `expanded=true` and kill hover until relaunch. Held so
@@ -196,6 +198,18 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
             object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.recoverHover("screens", rearmTimer: false) }
         })
+        // Nothing to hover while the displays sleep or the screen is locked — stop the poll entirely.
+        let pause: (Notification) -> Void = { [weak self] _ in
+            Task { @MainActor in self?.hoverPaused = true; self?.hoverTimer?.invalidate() }
+        }
+        let resume: (Notification) -> Void = { [weak self] _ in
+            Task { @MainActor in self?.hoverPaused = false; self?.startHoverTracking() }
+        }
+        systemObservers.append(ws.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main, using: pause))
+        systemObservers.append(ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main, using: resume))
+        let dnc = DistributedNotificationCenter.default()
+        systemObservers.append(dnc.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main, using: pause))
+        systemObservers.append(dnc.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main, using: resume))
     }
 
     private func recoverHover(_ why: String, rearmTimer: Bool) {
@@ -356,18 +370,35 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
     // MARK: - Hover-driven expand / collapse (no clicks)
 
     private func startHoverTracking() {
+        scheduleHoverTick(after: 0.12)
+    }
+
+    /// Poll the cursor against the light/panel rects: reliable regardless of window activation
+    /// (a non-activating panel doesn't reliably get mouse-moved events). One-shot, re-armed after each
+    /// tick: ~8 Hz while the pointer is near the light or the panel is up, ~2 Hz otherwise — a fixed
+    /// 8 Hz woke the process around the clock. Registered in `.common` (not the implicit `.default` of
+    /// `scheduledTimer`) so it keeps firing during modal/event-tracking run-loop passes — window drags,
+    /// menu tracking, and the run-loop modes some fullscreen video players spin.
+    private func scheduleHoverTick(after interval: TimeInterval) {
         hoverTimer?.invalidate()
-        // Poll the cursor against the light/panel rects: reliable regardless of window activation
-        // (a non-activating panel doesn't reliably get mouse-moved events), and cheap at ~8 Hz.
-        // Registered in `.common` (not the implicit `.default` of `scheduledTimer`) so it keeps firing
-        // during modal/event-tracking run-loop passes — window drags, menu tracking, and the run-loop
-        // modes some fullscreen video players spin — instead of silently stalling until they end.
-        let t = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in self.hoverTick() }
+        guard !hoverPaused else { return }
+        let t = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.hoverTick()
+                self.scheduleHoverTick(after: self.hoverNeedsFastPoll ? 0.12 : 0.5)
+            }
         }
+        t.tolerance = interval * 0.2   // lets the system coalesce the wakeup with others
         RunLoop.main.add(t, forMode: .common)
         hoverTimer = t
+    }
+
+    /// The pointer is close enough to reach the light within one slow tick, or a hover is in progress.
+    private var hoverNeedsFastPoll: Bool {
+        if expanded || pinnedOpen || insideSince != nil || outsideSince != nil { return true }
+        guard let light = lightPanel, light.isVisible, lightShown else { return false }
+        return light.frame.insetBy(dx: -150, dy: -150).contains(NSEvent.mouseLocation)
     }
 
     private func hoverTick() {
@@ -478,6 +509,7 @@ final class FloatingWidgetController: NSObject, NSWindowDelegate {
         panel.orderFrontRegardless()
         panel.order(.above, relativeTo: light.windowNumber)
         updateLightOpacity()
+        engine.usageWanted()
         Log.watcher.debug("hover expand")
     }
 
@@ -962,7 +994,7 @@ struct LightRootView: View {
     /// The tower ONLY animates (pulses) while a red request/attention item is on screen — driven here.
     private var light: LightInput {
         LightInput(red: engine.waitingCount, yellow: engine.workingCount, green: engine.doneCount,
-                   detail: settings.displayMode == .summary, urgent: !urgentItems.isEmpty,
+                   detail: settings.displayMode == .summary, urgentCount: urgentItems.count,
                    compacting: engine.compactingCount > 0)
     }
 

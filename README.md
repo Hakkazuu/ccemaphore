@@ -46,6 +46,7 @@ never window-switch just to check status.
   Done**: project · git branch · chat title · context % · the running command. Its bottom bar holds
   **Chats**, **History**, **Settings** and **Quit**; **↻** at the top refreshes.
 - **Drag** the light anywhere; switch on **Pin position** in Settings to lock it there.
+- **Open at login** in **Settings ▸ General** starts the light with your Mac.
 - **A chat needs permission?** The light turns into a **ribbon** right where it sits — **Allow / Deny /
   All in chat** (allow everything in that chat from now on), plus the exact command — so you decide
   without opening the chat.
@@ -90,7 +91,7 @@ Only these things reach the network:
 
 - **Update checks → GitHub.** Unless you turn updates off, ccemaphore asks GitHub once a day whether
   there's a new version, and downloads it from there. GitHub sees your IP address, the app version (in
-  the User-Agent, e.g. `ccemaphore/1.3.1 Sparkle/2.10.0`) and your preferred language (the
+  the User-Agent, e.g. `ccemaphore/1.4.0 Sparkle/2.10.0`) and your preferred language (the
   `Accept-Language` header macOS adds). Each check also bumps the public download counter of the
   release's `appcast.xml` — one aggregate number anyone can see, with nothing that identifies you.
   Cookies are not stored, and no system profile is sent.

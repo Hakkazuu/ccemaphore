@@ -510,6 +510,7 @@ final class HistoryWindowController {
             window = w
         }
         window?.title = L("window.history.title")
+        StateEngine.shared.usageWanted()
         window?.makeKeyAndOrderFront(nil)
         if #available(macOS 14.0, *) { NSApp.activate() } else { NSApp.activate(ignoringOtherApps: true) }
     }

@@ -11,7 +11,10 @@ struct LightInput: Equatable {
     /// ONLY this — animates the tower (housing pulse + lamp glow-pulse + urgency ring). Any other state
     /// (idle, plain working/done, even a red with no ribbon shown) renders statically. So the pulse is a
     /// meaningful "act now" cue that stops the instant the ribbon clears — never ambient, never stuck.
-    var urgent: Bool = false
+    var urgent: Bool { urgentCount > 0 }
+    /// Red items on the ribbon. A change (a new request, or the next one moving to the front) re-arms the
+    /// pulse, which otherwise settles after `DS.urgentPulseWindow`.
+    var urgentCount: Int = 0
     /// A working chat is compacting its context right now → show the compress chip on the YELLOW lamp.
     /// The lamp stays yellow (compacting is a `working` sub-state); the chip is a "quiet signal" that says
     /// "busy because it's compacting", not stuck. Static: it must NOT animate (motion is reserved for an
@@ -68,6 +71,10 @@ struct LightTowerView: View {
     @State private var glow = false
     /// Red-only expanding ring (scale 1→2.3, opacity .65→0).
     @State private var ring = false
+    /// The bounded pulse has run out: static red until the next urgent event.
+    @State private var settled = false
+    /// Bumped on every (re)arm so a stale settle timer can tell it was superseded.
+    @State private var armGeneration = 0
 
     var body: some View {
         let g = Geo(detail: input.detail, scale: scale, orientation: orientation)
@@ -76,7 +83,7 @@ struct LightTowerView: View {
             .scaleEffect(input.urgent ? breatheScale : 1, anchor: .center)
             .onAppear(perform: startAnimations)
             // Re-arm when urgency toggles (start/stop the loops) or the dominant changes the curve.
-            .onChange(of: input.urgent) { _ in startAnimations() }
+            .onChange(of: input.urgentCount) { _ in startAnimations() }
             .onChange(of: input.dominant) { _ in startAnimations() }
     }
 
@@ -254,7 +261,8 @@ struct LightTowerView: View {
     private func startAnimations() {
         // Reset to the base endpoint so a re-arm always starts from a known state. When not urgent we
         // stop here: no loops armed, and the urgent-gated modifier values above already sit at rest.
-        pulse = false; glow = false; ring = false
+        pulse = false; glow = false; ring = false; settled = false
+        armGeneration += 1
         guard input.urgent else { return }   // ONLY an on-screen red request animates the tower
 
         // Housing urgent pulse.
@@ -268,6 +276,13 @@ struct LightTowerView: View {
         // Red urgency ring.
         if wantsRing {
             withAnimation(DS.ring) { ring = true }
+        }
+        // Bounded: settle to a static red (the ribbon stays up) — a request can sit unanswered for hours.
+        let generation = armGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + DS.urgentPulseWindow) {
+            guard generation == armGeneration else { return }   // re-armed or stopped meanwhile
+            // A non-repeating transaction on the same state replaces the repeatForever loops.
+            withAnimation(.easeOut(duration: 0.4)) { pulse = false; glow = false; settled = true }
         }
     }
 
@@ -286,7 +301,7 @@ struct LightTowerView: View {
     }
 
     /// Ring shows only for an urgent, dominant-red tower (§3.3).
-    private var wantsRing: Bool { input.urgent && input.dominant == .red }
+    private var wantsRing: Bool { input.urgent && input.dominant == .red && !settled }
 
     // MARK: - Per-lamp state
 

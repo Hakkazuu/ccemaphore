@@ -11,7 +11,15 @@ enum Tuning {
     /// rollout open, so this is how a Codex turn's start / end reaches the light. One `stat` per tracked
     /// thread, so it can run much faster than `stateTick`.
     static let codexPoll: TimeInterval = 1.5
-    static let usageRefresh: TimeInterval = 45       // ccusage cadence (expensive — keep slow)
+    /// Background ccusage cadence — and even then it runs only if a local chat was active since the last
+    /// run began (`StateEngine.refreshUsageIfNeeded`). One run re-reads the whole history: ~30 CPU-s and
+    /// 2+ GB RSS, so an idle machine must never pay it.
+    static let usageRefresh: TimeInterval = 5 * 60
+    /// Minimum gap between interactive ccusage runs (panel / History opened while chats are active), so
+    /// hovering the light in and out doesn't respawn it.
+    static let usageInteractiveGap: TimeInterval = 60
+    /// Cheap housekeeping cadence: hook-status / broker-file GC + the pending-set reconcile.
+    static let maintenanceTick: TimeInterval = 45
     /// Keep a parent chat "working" this long after its last sub-agent / workflow transcript write.
     /// Wider than `activeWindow` because sub-agents (and workflow fan-outs) go silent mid-task between
     /// stages; without the slack the chat would briefly flip to "done" while real work continues.

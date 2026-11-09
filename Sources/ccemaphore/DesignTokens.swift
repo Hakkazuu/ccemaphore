@@ -101,6 +101,10 @@ enum DS {
     static let urgent    = Animation.easeInOut(duration: 1.6).repeatForever(autoreverses: true)
     static let glowPulse = Animation.easeInOut(duration: 2.6).repeatForever(autoreverses: true)
     static let ring      = Animation.easeOut(duration: 1.6).repeatForever(autoreverses: false)
+    /// How long an urgent tower pulses before settling to a static red: two `urgent` housing cycles, so it
+    /// settles at rest. Each frame re-renders the hosting view and makes WindowServer re-blur the desktop
+    /// behind the housing (~50 % CPU here + ~75 % WindowServer, measured) — never loop it for hours.
+    static let urgentPulseWindow: TimeInterval = 6.4
     static let ribbonExpand = Animation.timingCurve(0.2, 0.82, 0.25, 1, duration: 0.34)
     static let panelPop     = Animation.timingCurve(0.2, 0.85, 0.35, 1.1, duration: 0.22)
     /// Settings: a page switch (tab or sub-screen) — a quick ease-out, the incoming page settling in place.

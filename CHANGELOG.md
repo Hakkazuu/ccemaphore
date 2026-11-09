@@ -5,6 +5,20 @@ All notable changes to **ccemaphore** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-11-10
+
+### Fixed
+- **Token numbers are fresh again when you open the panel.** In 1.4.0 the refresh that opening the panel or
+  History starts often failed, so per-chat numbers only caught up with the next background refresh. It now
+  starts ccusage the same way as the background refreshes (at full speed), retries a failed per-chat report
+  once, and a failed refresh no longer lets the next one start early.
+- **A failing ccusage now says why.** The log records its exit code and error message
+  (**Settings ▸ General ▸ Save logs**).
+
+### Changed
+- While you work, the background refresh of token numbers runs every 15 minutes instead of 5 — opening the
+  panel or History is what brings them up to date.
+
 ## [1.4.0] - 2026-11-10
 
 ### Added
@@ -211,6 +225,7 @@ Early patch releases following the initial launch. See the
     prompts, plus token/cost stats via `ccusage`.
 - Full localization: English, Русский, Español, Deutsch, Français.
 
+[1.4.1]: https://github.com/hakkazuu/ccemaphore/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/hakkazuu/ccemaphore/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/hakkazuu/ccemaphore/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/hakkazuu/ccemaphore/compare/v1.2.1...v1.3.0

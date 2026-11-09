@@ -101,7 +101,7 @@ Seuls ces éléments passent par le réseau :
 - **Vérification des mises à jour → GitHub.** Sauf si vous désactivez les mises à jour, ccemaphore
   demande une fois par jour à GitHub s'il existe une nouvelle version, et la télécharge depuis GitHub.
   GitHub voit votre adresse IP, la version de l'app (dans le User-Agent, p. ex.
-  `ccemaphore/1.4.0 Sparkle/2.10.0`) et votre langue préférée (l'en-tête `Accept-Language` qu'ajoute
+  `ccemaphore/1.4.1 Sparkle/2.10.0`) et votre langue préférée (l'en-tête `Accept-Language` qu'ajoute
   macOS). Chaque vérification incrémente aussi le compteur public de téléchargements du fichier
   `appcast.xml` de la version — un seul chiffre global, visible de tous, qui ne permet pas de vous
   identifier. Aucun cookie n'est conservé et aucun profil système n'est envoyé.

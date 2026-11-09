@@ -126,8 +126,10 @@ final class StateEngine: ObservableObject {
     private var usageTimer: Timer?
     private var maintenanceTimer: Timer?
     private var usageInFlight = false
-    /// When the last ccusage run began — the "anything new since?" watermark for `refreshUsageIfNeeded`.
-    private var usageStartedAt: Date?
+    /// When the last ccusage run began, failed or not — spaces runs out (`UsageSchedule`).
+    private var usageAttemptAt: Date?
+    /// When the last SUCCESSFUL run began — the "anything new since?" watermark.
+    private var usageSuccessAt: Date?
     private var remotePollTimer: Timer?
     private var remotePendingTimer: Timer?
     /// Latest remote pending requests (all hosts), merged into `pendingRequests` on every render.
@@ -593,12 +595,11 @@ final class StateEngine: ObservableObject {
     }
 
     /// ccusage re-reads the whole history on every run, so skip it unless a local chat has been active
-    /// since the last run began — an idle machine never spawns it — and space runs at least `minGap` apart.
+    /// since the last good run began — an idle machine never spawns it — and space runs `minGap` apart.
     private func refreshUsageIfNeeded(background: Bool, minGap: TimeInterval) async {
-        if let last = usageStartedAt {
-            guard Date().timeIntervalSince(last) >= minGap,
-                  sessions.contains(where: { !$0.isRemote && $0.lastActivity > last }) else { return }
-        }
+        let latest = sessions.lazy.filter { !$0.isRemote }.map(\.lastActivity).max()
+        guard UsageSchedule.shouldRun(now: Date(), minGap: minGap, lastAttempt: usageAttemptAt,
+                                      lastSuccess: usageSuccessAt, latestActivity: latest) else { return }
         await refreshUsage(background: background)
     }
 
@@ -606,10 +607,11 @@ final class StateEngine: ObservableObject {
         guard !usageInFlight else { return }   // never stack a second multi-GB run on a running one
         usageInFlight = true
         defer { usageInFlight = false }
-        let previousStart = usageStartedAt
-        usageStartedAt = Date()
-        // A failed run covers nothing — keep the old watermark so the next trigger retries.
-        if !(await usage.refresh(background: background)) { usageStartedAt = previousStart }
+        let start = Date()
+        usageAttemptAt = start
+        // Only a run that brought both reports back moves the watermark; a failed one is retried by the next
+        // trigger — no sooner than `minGap` after it, so failures can't chain back to back.
+        if await usage.refresh(background: background) { usageSuccessAt = start }
         usageBySession = await usage.bySession
         days = await usage.days
         render()

@@ -96,7 +96,7 @@ Nur Folgendes geht ins Netz:
 
 - **Update-Prüfung → GitHub.** Sofern du Updates nicht ausschaltest, fragt ccemaphore einmal täglich bei
   GitHub nach einer neuen Version und lädt sie von dort. GitHub sieht deine IP-Adresse, die App-Version
-  (im User-Agent, z. B. `ccemaphore/1.4.0 Sparkle/2.10.0`) und deine bevorzugte Sprache (den
+  (im User-Agent, z. B. `ccemaphore/1.4.1 Sparkle/2.10.0`) und deine bevorzugte Sprache (den
   `Accept-Language`-Header, den macOS hinzufügt). Jede Prüfung erhöht außerdem den öffentlichen
   Download-Zähler der `appcast.xml` des Releases – eine einzige Gesamtzahl, die jeder sehen kann und die
   nichts über dich verrät. Cookies werden nicht gespeichert, und es wird kein Systemprofil gesendet.

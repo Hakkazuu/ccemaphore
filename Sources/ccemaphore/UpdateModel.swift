@@ -40,7 +40,7 @@ enum UpdateMode: String, CaseIterable, Identifiable, Sendable {
 
 /// A found update, in UI terms (no Sparkle types).
 struct UpdateInfo: Equatable, Sendable {
-    /// Human version, e.g. "1.4.0" (appcast `sparkle:shortVersionString`).
+    /// Human version, e.g. "1.4.1" (appcast `sparkle:shortVersionString`).
     var displayVersion: String
     /// Build number, e.g. "5" (appcast `sparkle:version`, compared with our `CFBundleVersion`).
     var buildVersion: String

@@ -14,6 +14,20 @@ import Darwin
 ///  - join keys: a live Claude session's id == `period`; a live Codex thread's id ==
 ///    `SessionInfo.codexID` of the uuid that ends `period`.
 /// Older ccusage (no `agent` field, no `--by-agent`) degrades to Claude-only numbers without a split.
+/// When a ccusage run is worth its cost — each one re-reads the whole history. Pure, so `--self-test`
+/// covers it.
+enum UsageSchedule {
+    /// - lastAttempt: when the last run began, failed or not — runs stay `minGap` apart even when they fail.
+    /// - lastSuccess: when the last run that brought both reports back began; nil until one has.
+    /// - latestActivity: the newest local chat activity (nil: no local chats).
+    static func shouldRun(now: Date, minGap: TimeInterval, lastAttempt: Date?, lastSuccess: Date?,
+                          latestActivity: Date?) -> Bool {
+        if let attempt = lastAttempt, now.timeIntervalSince(attempt) < minGap { return false }
+        guard let success = lastSuccess else { return true }   // never succeeded: worth a try
+        return (latestActivity ?? .distantPast) > success       // only if something changed since
+    }
+}
+
 actor UsageProvider {
     private(set) var bySession: [String: TokenUsage] = [:]
     private(set) var days: [DayStat] = []
@@ -59,8 +73,9 @@ actor UsageProvider {
             lastRunnerPath = exe.path
             Log.usage.info("ccusage runner: \(exe.path)")
         }
-        // Plain `ccusage` (not `ccusage@latest`): bunx/npx reuses the cached copy instead of doing a
-        // registry round-trip on every refresh — faster, and it works offline once installed.
+        // Plain `ccusage`, not `ccusage@latest`. Note that bunx still checks the npm registry and
+        // re-extracts the package on every run (seen in its stderr and in the system log) — one more reason
+        // runs are rare now.
         // `--by-agent` adds the per-day Claude/Codex split; an older ccusage rejects it, so fall back
         // to the plain report and, after repeated rejections, stop asking for a while (see `byAgentSupported`).
         var tryByAgent = byAgentSupported != false
@@ -77,7 +92,13 @@ actor UsageProvider {
         // One after the other: two bunx started together race on its package cache and both exit 1 (~1 in 4
         // here), and each run peaks at 2+ GB RSS — so never two at once.
         var dailyData = await Self.run(exe, tryByAgent ? plainDaily + ["--by-agent"] : plainDaily, background: background)
-        let sessionData = await Self.run(exe, ["ccusage", "session", "--json"], background: background)
+        var sessionData = await Self.run(exe, ["ccusage", "session", "--json"], background: background)
+        if sessionData == nil {
+            // One immediate retry: the per-chat numbers live only in this report, and a failure here has been
+            // transient (the reason is logged by `run`). A second failure waits for the next trigger.
+            sessionData = await Self.run(exe, ["ccusage", "session", "--json"], background: background)
+            Log.usage.info("ccusage session retry \(sessionData == nil ? "failed too" : "ok")")
+        }
         if tryByAgent {
             if dailyData != nil {
                 byAgentSupported = true
@@ -251,15 +272,21 @@ actor UsageProvider {
     private static func run(_ exe: URL, _ args: [String], background: Bool) async -> Data? {
         // The background clamp stretches a full `session` read to ~35 s on E-cores — give it room.
         let timeout: TimeInterval = background ? 180 : 30
+        let what = args.dropFirst().first ?? "?"   // the ccusage subcommand, for the log
         return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
             DispatchQueue.global(qos: .utility).async {
                 let proc = Process()
-                // `taskpolicy -c background` execs the runner in place (same pid, so the process-group
-                // watchdog below still works) and the clamp is inherited by its node/bun → ccusage children.
+                // `taskpolicy` execs the runner in place (same pid, so the process-group watchdog below still
+                // works) and its policy is inherited by the node/bun → ccusage children. Both kinds of run go
+                // through it: `-c background` puts nobody-waiting refreshes on the E-cores; `-t 0 -l 0` (no
+                // throttling) keeps an interactive one at full speed (~5.5 s for a full `session`, same as a
+                // direct spawn — a `-c utility` clamp measured 2.3× slower). In 1.4.0 only background runs did,
+                // and interactive ones spawned directly from the GUI failed ~3 in 4, reproducible from no shell,
+                // so the launch path is now the same for both.
                 let taskpolicy = "/usr/sbin/taskpolicy"
-                if background, FileManager.default.isExecutableFile(atPath: taskpolicy) {
+                if FileManager.default.isExecutableFile(atPath: taskpolicy) {
                     proc.executableURL = URL(fileURLWithPath: taskpolicy)
-                    proc.arguments = ["-c", "background", exe.path] + args
+                    proc.arguments = (background ? ["-c", "background"] : ["-t", "0", "-l", "0"]) + [exe.path] + args
                 } else {
                     proc.executableURL = exe
                     proc.arguments = args
@@ -271,12 +298,13 @@ actor UsageProvider {
                 env["PATH"] = (extra + [env["PATH"] ?? ""]).joined(separator: ":")
                 proc.environment = env
                 let out = Pipe()
+                let err = Pipe()
                 proc.standardOutput = out
-                proc.standardError = FileHandle.nullDevice
+                proc.standardError = err
                 do {
                     try proc.run()
                 } catch {
-                    Log.usage.warn("ccusage spawn failed (\(exe.lastPathComponent) \(args.first ?? "")): \(error.localizedDescription)")
+                    Log.usage.warn("ccusage spawn failed (\(exe.lastPathComponent) \(what)): \(error.localizedDescription)")
                     cont.resume(returning: nil)
                     return
                 }
@@ -296,11 +324,19 @@ actor UsageProvider {
                 }
                 let killer = DispatchWorkItem {
                     guard proc.isRunning else { return }
-                    Log.usage.warn("ccusage \(args.first ?? "") timed out after \(Int(timeout))s — terminating")
+                    Log.usage.warn("ccusage \(what) timed out after \(Int(timeout))s — terminating")
                     if kill(-pid, SIGTERM) != 0 { proc.terminate() }
                     DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2, execute: sigkill)
                 }
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: killer)
+                // stderr drains on its own thread: a full pipe would stall the child while we sit on stdout.
+                var errData = Data()
+                let errDone = DispatchGroup()
+                errDone.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    errData = err.fileHandleForReading.readDataToEndOfFile()
+                    errDone.leave()
+                }
                 // readDataToEndOfFile returns at EOF — on normal exit, or once the watchdog's signals
                 // close every write end of the pipe. terminationStatus != 0 then discards the partial data.
                 let data = out.fileHandleForReading.readDataToEndOfFile()
@@ -308,11 +344,25 @@ actor UsageProvider {
                 killer.cancel()
                 let status = proc.terminationStatus
                 if status != 0 {
-                    Log.usage.debug("ccusage \(args.first ?? "") exit=\(status) reason=\(proc.terminationReason == .uncaughtSignal ? "signal" : "exit")")
+                    // Bounded: a grandchild still holding stderr must not hold this worker.
+                    let stderr = errDone.wait(timeout: .now() + 2) == .success ? Self.stderrTail(errData) : "(unread)"
+                    let how = proc.terminationReason == .uncaughtSignal ? "signal" : "exit"
+                    Log.usage.warn("ccusage \(what) failed: \(how) \(status), \(data.count)B stdout, stderr: \(stderr)")
                 }
                 cont.resume(returning: status == 0 ? data : nil)
             }
         }
+    }
+
+    /// The end of a failed run's stderr, on one line, without bunx's package-resolution chatter.
+    static func stderrTail(_ data: Data, limit: Int = 600) -> String {
+        let noise = ["Resolving dependencies", "Resolved, downloaded and extracted", "Saved lockfile"]
+        let lines = String(decoding: data, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { line in !line.isEmpty && !noise.contains { line.hasPrefix($0) } }
+        let text = lines.joined(separator: " | ")
+        return text.isEmpty ? "(empty)" : text.count > limit ? "…" + text.suffix(limit) : text
     }
 
     /// Locate `bunx` (preferred) or `npx` by absolute path — never rely on the inherited GUI PATH.

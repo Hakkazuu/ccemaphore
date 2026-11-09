@@ -8,7 +8,32 @@ extension SelfTest {
             Suite(name: "Agent actions (Claude)", body: claudeActions),
             Suite(name: "Agent actions (Codex)", body: codexActions),
             Suite(name: "Sub-agent rows", body: childRows),
+            Suite(name: "Usage schedule", body: usageSchedule),
         ]
+    }
+
+    /// When ccusage runs (`UsageSchedule`) and what a failed run's log line keeps (`stderrTail`).
+    private static func usageSchedule(_ t: inout Tester) {
+        let t0 = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        func run(at s: TimeInterval, gap: TimeInterval = 60, attempt: TimeInterval?, success: TimeInterval?,
+                 activity: TimeInterval?) -> Bool {
+            UsageSchedule.shouldRun(now: t0 + s, minGap: gap, lastAttempt: attempt.map { t0 + $0 },
+                                    lastSuccess: success.map { t0 + $0 }, latestActivity: activity.map { t0 + $0 })
+        }
+        t.expect(run(at: 0, attempt: nil, success: nil, activity: nil), "first run ever goes")
+        t.expect(!run(at: 100, attempt: 0, success: 0, activity: -10), "idle since the last good run: no run")
+        t.expect(!run(at: 100, attempt: 0, success: 0, activity: nil), "no local chats: no run")
+        t.expect(run(at: 100, attempt: 0, success: 0, activity: 50), "activity since the last good run: run")
+        t.expect(!run(at: 30, attempt: 0, success: 0, activity: 20), "activity, but within the gap: wait")
+        t.expect(!run(at: 30, attempt: 0, success: -500, activity: -100), "a failed run still counts for the gap")
+        t.expect(run(at: 70, attempt: 0, success: -500, activity: -100), "after the gap, a failed run is retried")
+        t.expect(run(at: 0, gap: 0, attempt: 0, success: -900, activity: -10), "background timer (gap 0) retries")
+
+        let noisy = Data("Resolving dependencies\nResolved, downloaded and extracted [2]\nSaved lockfile\nerror: EMFILE\n  at read\n".utf8)
+        t.equal(UsageProvider.stderrTail(noisy), "error: EMFILE | at read", "stderr tail drops bunx chatter, one line")
+        t.equal(UsageProvider.stderrTail(Data()), "(empty)", "empty stderr is said so")
+        t.equal(UsageProvider.stderrTail(Data(String(repeating: "x", count: 700).utf8), limit: 10), "…xxxxxxxxxx",
+                "a long stderr keeps its end")
     }
 
     private static func claudeActions(_ t: inout Tester) {

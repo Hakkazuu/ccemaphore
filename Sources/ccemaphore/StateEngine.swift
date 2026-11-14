@@ -361,7 +361,7 @@ final class StateEngine: ObservableObject {
     }
 
     private func pollRemotePending() {
-        remotePermissionRelay.pollAll { [weak self] reqs in
+        remotePermissionRelay.pollAll(widgetVisible: widgetVisible) { [weak self] reqs in
             guard let self else { return }
             self.remotePendingRequests = self.autoDecideRemote(reqs)
             self.recomputePending()
@@ -1197,13 +1197,15 @@ final class StateEngine: ObservableObject {
     /// Record the user's choice for an interactive permission request (popover buttons). Writes the
     /// decision the blocking hook is polling for, then optimistically drops it from the list so the row
     /// disappears at once (the pending-dir watcher reconciles the authoritative state right after).
-    func decidePermission(_ req: PermissionBroker.PendingRequest, _ decision: PermissionBroker.Decision) {
+    func decidePermission(_ req: PermissionBroker.PendingRequest, _ decision: PermissionBroker.Decision,
+                          remoteHandoff: Bool = false) {
         if req.remoteHostId != nil {
             // "Allow all in chat" on a remote request: remember it HERE (the shim keeps no such memory) so
             // `autoDecideRemote` relays an instant allow for every later request from this session. The
             // remote parity of the local broker's `setAllowAll`.
             if decision == .allowAll { remoteAllowAll.insert(req.sessionId) }
-            remotePermissionRelay.decide(requestId: req.requestId, decision: decision) { [weak self] message in
+            remotePermissionRelay.decide(requestId: req.requestId, decision: decision,
+                                         keepVisibleForHandoff: remoteHandoff) { [weak self] message in
                 guard let self else { return }
                 // The relay retried and still couldn't reach the host — the click never got to the remote
                 // hook (still blocking). Don't let it vanish silently: re-surface the request so the ribbon

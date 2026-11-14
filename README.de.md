@@ -108,7 +108,11 @@ Nur Folgendes geht ins Netz:
   `bunx`/`npx`, die das Paket aus der npm-Registry laden können; ccusage selbst kann aktuelle
   Modellpreise abrufen.
 - **SSH-Remote-Hosts** (optional) – ccemaphore verbindet sich nur mit den Hosts, die du selbst
-  hinzufügst, über dein eigenes `ssh`.
+  hinzufügst, über dein eigenes `ssh`. Beim Installieren werden ccemaphore-Einträge zu den Claude-Code-
+  Einstellungen und `~/.codex/hooks.json` hinzugefügt; andere Hooks bleiben erhalten. Codex-Hooks müssen
+  einmal in Codex freigegeben werden. Solange das Widget sichtbar ist, kannst du entfernte Codex-Anfragen
+  hier erlauben oder ablehnen.
+  **Chat öffnen** gibt die Anfrage an Codex' eigenen Dialog zurück.
 
 Sonst nichts – weder Chat-Inhalte noch irgendwelche Kennungen verlassen jemals deinen Mac. Nutzt du
 eine ausgehende Firewall (Little Snitch, LuLu), rechne bei der ersten Update-Prüfung mit einer

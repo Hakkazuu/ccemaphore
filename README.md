@@ -100,7 +100,11 @@ Only these things reach the network:
   off, ccemaphore never checks on its own (you can still check by hand).
 - **ccusage** (token & cost stats, only when Node or Bun is installed) runs via `bunx`/`npx`, which may
   fetch the package from the npm registry; ccusage itself may download current model pricing.
-- **SSH remote hosts** (opt-in) — ccemaphore connects only to the hosts you add, using your own `ssh`.
+- **SSH remote hosts** (opt-in) — ccemaphore connects only to the hosts you add, using your own `ssh`. When
+  you install remote hooks, it merges its entries into Claude Code settings and Codex's `~/.codex/hooks.json`
+  while preserving other hooks. Codex hooks must be approved once in Codex. While the widget is visible,
+  remote Codex requests can be allowed or denied here; **Open chat** releases the hook so Codex shows its
+  own prompt.
 
 Nothing else — no chat content and no identifiers ever leave your Mac. If you run an outbound firewall
 (Little Snitch, LuLu), expect a one-time prompt for GitHub on the first update check.

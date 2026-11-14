@@ -123,7 +123,8 @@ enum DeepLinker {
     /// (the user lands in the right VS Code window and picks the chat from its own session list) without
     /// that risk. Best-effort and silent on failure, like every other path here — a stray remote host with
     /// no local VS Code / no matching SSH config entry just doesn't jump, it never errors visibly.
-    private static func focusRemote(remoteHostId: String, cwd: String?, sid: Substring) {
+    private static func focusRemote(remoteHostId: String, cwd: String?, sid: Substring,
+                                    remoteHostname: String? = nil, resolvedRemoteHostname: Bool = false) {
         guard let host = RemoteHosts.resolve(remoteHostId) else {
             Log.focus.info("jump sid=\(sid): remote host \(remoteHostId.prefix(8)) no longer configured — skip")
             return
@@ -145,25 +146,53 @@ enum DeepLinker {
         let authorityPart = "ssh-remote+\(authority)"
 
         // FIRST choice: raise an already-open window directly via Accessibility, matching the host in its
-        // title — VS Code titles a Remote-SSH window "… [SSH: <host>]". Neither the `code` CLI's
-        // `--folder-uri` NOR the `vscode://vscode-remote/...` URI were found to reuse an existing window
+        // title — VS Code titles a Remote-SSH window "… [SSH: <host>]". Include the app's label as well:
+        // users commonly connect VS Code with an SSH config alias while ccemaphore stores the IP address.
+        // Neither the `code` CLI's `--folder-uri` NOR the `vscode://vscode-remote/...` URI were found to reuse an existing window
         // for an already-open remote folder (both were confirmed live to always spawn a fresh one), so
         // this AX-based match is the only path that avoids window-duplication for a remote jump.
-        if let bundleId = vscodeBundleId, FocusResolver.accessibilityGranted {
-            for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleId) {
-                let pid = app.processIdentifier
-                for (window, title) in FocusResolver.windowTitles(pid: pid)
-                where title.localizedCaseInsensitiveContains(host.hostname)
-                    || (host.sshUser.map { title.localizedCaseInsensitiveContains($0) } ?? false) {
-                    FocusResolver.raiseWindow(window, appPid: pid)
-                    Log.focus.info("jump sid=\(sid) host=remote(\(host.label)) via=ax-window-match ok")
-                    return
+        if let bundleId = vscodeBundleId {
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+            if FocusResolver.accessibilityGranted {
+                let needles = [host.hostname, host.label, authority, host.sshUser, remoteHostname]
+                    .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                for app in apps {
+                    let pid = app.processIdentifier
+                    for (window, title) in FocusResolver.windowTitles(pid: pid)
+                    where needles.contains(where: { title.localizedCaseInsensitiveContains($0) }) {
+                        FocusResolver.raiseWindow(window, appPid: pid)
+                        Log.focus.info("jump sid=\(sid) host=remote(\(host.label)) via=ax-window-match ok")
+                        return
+                    }
                 }
+            } else if let app = apps.first {
+                // Without Accessibility the window titles cannot be inspected. Reuse the running editor
+                // rather than opening a duplicate Remote-SSH window; the user can grant Accessibility
+                // for exact host-window selection.
+                app.activate(options: [.activateIgnoringOtherApps])
+                Log.focus.info("jump sid=\(sid) host=remote(\(host.label)) via=activate-existing-no-ax")
+                return
             }
         }
 
-        // Fall back to the `code` CLI (spawns a fresh window if none matched above, or if Accessibility
-        // isn't granted / VS Code isn't running yet to search).
+        // The SSH target may be an IP while an existing VS Code window is titled with the remote
+        // machine's hostname (for example `root@10.0.6.13` vs. `[SSH: VpnControl]`). Resolve that name
+        // only after the cheap local title match misses, and do the SSH lookup off the main thread.
+        if !resolvedRemoteHostname {
+            Task.detached(priority: .userInitiated) {
+                let name = try? RemoteExec.run(host, command: "hostname", timeout: 5)
+                let cleaned = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+                await MainActor.run {
+                    focusRemote(remoteHostId: remoteHostId, cwd: cwd, sid: sid,
+                                remoteHostname: cleaned?.isEmpty == false ? cleaned : nil,
+                                resolvedRemoteHostname: true)
+                }
+            }
+            return
+        }
+
+        // Fall back to the `code` CLI only when no running VS Code instance can be reused.
         if let bin = vscodeBin {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: bin)

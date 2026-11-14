@@ -113,7 +113,11 @@ Seuls ces éléments passent par le réseau :
   `bunx`/`npx`, qui peuvent télécharger le paquet depuis le registre npm ; ccusage lui-même peut
   récupérer les tarifs actuels des modèles.
 - **Hôtes distants via SSH** (facultatif) — ccemaphore ne se connecte qu'aux hôtes que vous ajoutez, avec
-  votre propre `ssh`.
+  votre propre `ssh`. Lors de l'installation des hooks, l'application ajoute ses entrées aux réglages de
+  Claude Code et à `~/.codex/hooks.json`, tout en conservant les autres hooks. Les hooks Codex doivent être
+  approuvés une fois dans Codex. Tant que le widget est visible, vous pouvez autoriser ou refuser ici les
+  demandes Codex distantes.
+  **Ouvrir le chat** rend la demande au dialogue natif de Codex.
 
 Rien d'autre : ni le contenu des conversations ni aucun identifiant ne quittent jamais votre Mac. Si
 vous utilisez un pare-feu sortant (Little Snitch, LuLu), attendez-vous à une demande unique concernant

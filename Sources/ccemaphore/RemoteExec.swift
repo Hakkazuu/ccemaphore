@@ -340,6 +340,104 @@ enum RemoteExec {
         return tails
     }
 
+    struct CodexCatalogRow: Sendable {
+        let title: String?
+        let parentThreadId: String?
+        let agentNickname: String?
+        let isSubagent: Bool
+    }
+
+    struct CodexFile: Sendable {
+        let size: UInt64
+        let meta: Data
+        let tail: Data
+        let catalog: CodexCatalogRow?
+    }
+
+    /// One SSH round-trip for changed Codex rollouts: their byte size, first (session_meta) line, and
+    /// bounded tail. Rollouts can be hundreds of MB and remain open while Codex writes, so never cat the
+    /// whole file. Base64 framing keeps arbitrary JSON bytes and paths unambiguous.
+    static func batchCodexFiles(_ host: RemoteHost, paths: [String], threadIds: [String: String] = [:], timeout: TimeInterval = 20) throws -> [String: CodexFile] {
+        guard !paths.isEmpty else { return [:] }
+        let b64paths = paths.map { Data($0.utf8).base64EncodedString() }.joined(separator: " ")
+        let ids = paths.compactMap { threadIds[$0] }
+            .filter { UUID(uuidString: $0) != nil }
+            .map { "'\($0.lowercased())'" }
+        let idList = ids.joined(separator: " ")
+        let script = """
+        for b in \(b64paths); do
+          q=$(printf %s "$b" | base64 -d)
+          [ -f "$q" ] || continue
+          n=$(wc -c < "$q" | tr -d ' ')
+          h=$(head -c 524288 "$q" | base64 | tr -d '\\n')
+          t=$(tail -c 524288 "$q" | base64 | tr -d '\\n')
+          printf 'C %s %s %s %s\\n' "$b" "$n" "$h" "$t"
+        done
+        if [ -n '\(idList)' ] && command -v python3 >/dev/null 2>&1; then
+          python3 -c 'import base64,sqlite3,sys
+        try:
+          db=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True,timeout=0.25)
+          ids=sys.argv[2:]
+          q="SELECT id,title,name,source,thread_source FROM threads WHERE lower(id) IN ("+",".join("?" for _ in ids)+")"
+          try: rows=db.execute(q,ids)
+          except sqlite3.OperationalError:
+            q="SELECT id,title,name,source,NULL FROM threads WHERE lower(id) IN ("+",".join("?" for _ in ids)+")"
+            rows=db.execute(q,ids)
+          for ident,title,name,source,thread_source in rows:
+            values=[ident,name or "",title or "",source or "",thread_source or ""]
+            encoded=[base64.b64encode(v.encode()).decode() or "-" for v in values]
+            print("N"," ".join(encoded))
+        except Exception: pass' "$HOME/.codex/state_5.sqlite" \(idList)
+        fi
+        printf 'E\\n'
+        """
+        let out = try runScript(host, script: script, timeout: timeout)
+        let lines = out.components(separatedBy: "\n")
+        guard lines.contains("E") else { throw SSHError(message: "batchCodexFiles: malformed response", exitCode: -2) }
+        var result: [String: CodexFile] = [:]
+        var catalog: [String: CodexCatalogRow] = [:]
+        for line in lines {
+            let titleParts = line.split(separator: " ").map(String.init)
+            if titleParts.count == 6, titleParts[0] == "N",
+               let idData = Data(base64Encoded: titleParts[1]), let id = String(data: idData, encoding: .utf8),
+               let name = decodeCodexCatalogField(titleParts[2]),
+               let rawTitle = decodeCodexCatalogField(titleParts[3]),
+               let source = decodeCodexCatalogField(titleParts[4]),
+               let sourceType = decodeCodexCatalogField(titleParts[5]) {
+                let parsedTitle = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let fallbackTitle = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .split(separator: "\n", maxSplits: 1).first.map(String.init)
+                let (parentId, nickname) = CodexIndex.parseSubagentSource(source)
+                catalog[id.lowercased()] = CodexCatalogRow(
+                    title: !parsedTitle.isEmpty ? parsedTitle : fallbackTitle,
+                    parentThreadId: parentId,
+                    agentNickname: nickname,
+                    isSubagent: parentId != nil || sourceType == "subagent" || source.hasPrefix("{"))
+                continue
+            }
+            let parts = line.split(separator: " ", maxSplits: 4).map(String.init)
+            guard parts.count == 5, parts[0] == "C", let size = UInt64(parts[2]),
+                  let pathData = Data(base64Encoded: parts[1]), let path = String(data: pathData, encoding: .utf8),
+                  let meta = Data(base64Encoded: parts[3]), let tail = Data(base64Encoded: parts[4]) else { continue }
+            result[path] = CodexFile(size: size, meta: meta, tail: tail, catalog: nil)
+        }
+        var titled: [String: CodexFile] = [:]
+        for (path, file) in result {
+            guard let id = threadIds[path]?.lowercased(), let row = catalog[id] else {
+                titled[path] = file
+                continue
+            }
+            titled[path] = CodexFile(size: file.size, meta: file.meta, tail: file.tail, catalog: row)
+        }
+        return titled
+    }
+
+    private static func decodeCodexCatalogField(_ encoded: String) -> String? {
+        if encoded == "-" { return "" }
+        guard let data = Data(base64Encoded: encoded) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     private static func parseBatchTails(_ out: String) -> [String: Data]? {
         let lines = out.components(separatedBy: "\n")
         guard lines.contains("E") else { return nil }

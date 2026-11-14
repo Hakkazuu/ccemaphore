@@ -19,7 +19,7 @@ enum RemoteHookShim {
 #!/usr/bin/env python3
 # Deployed by ccemaphore's RemoteHooksInstaller — DO NOT EDIT BY HAND, it is overwritten on every
 # (re)install. See Sources/ccemaphore/RemoteHookShim.swift in the ccemaphore repo for the source of truth.
-import json, os, sys, time, uuid, fcntl
+import json, os, re, sys, time, uuid, fcntl
 from datetime import datetime, timezone
 
 BASE = os.path.expanduser("~/.claude/ccemaphore")
@@ -70,13 +70,13 @@ def read_nb(status_path):
     except Exception:
         return 0, None
 
-def write_status(session_id, cwd, state, event):
+def write_status(session_id, cwd, state, event, agent="claude"):
     # Serialize the nb_seq read-modify-write across the concurrent hook/relay-decision processes that all
     # write this session's one file with a single flock'd sidecar — mirrors HookHandler.withStatusLock.
     # Best-effort: if the lock can't be taken the write still happens (a status file must never be lost to
     # a locking failure); flock self-releases if the process dies mid-section.
     os.makedirs(STATUS_DIR, exist_ok=True)
-    path = os.path.join(STATUS_DIR, f"{session_id}.json")
+    path = os.path.join(STATUS_DIR, f"{session_id.replace(':', '-')}.json")
     fd = -1
     try:
         fd = os.open(os.path.join(STATUS_DIR, ".lock"), os.O_CREAT | os.O_WRONLY, 0o644)
@@ -102,6 +102,9 @@ def write_status(session_id, cwd, state, event):
                              # is used ONLY to gate the shim's own blocking wait, never this field.
             "nb_seq": nb_seq,
         }
+        if agent == "codex":
+            out["agent"] = "codex"
+            out["host"] = "codexApp"
         if nb_event is not None:
             out["nb_event"] = nb_event
         atomic_write(path, json.dumps(out, sort_keys=True).encode())
@@ -115,7 +118,10 @@ def beacon_fresh():
     # don't block. Same clock domain both sides (the Mac writes it here over SSH, we read it here), so no
     # cross-machine skew. The remote analogue of the local AppPresence readiness gate.
     try:
-        return (time.time() - os.path.getmtime(BEACON)) <= BEACON_MAX_AGE
+        if (time.time() - os.path.getmtime(BEACON)) > BEACON_MAX_AGE:
+            return False
+        with open(BEACON) as f:
+            return f.read().strip() == "1"
     except OSError:
         return False
 
@@ -177,20 +183,31 @@ def gc_orphans():
     except OSError:
         pass
 
-def handle_basic_event(event, payload):
+def session_identity(payload, declared_agent="claude"):
+    transcript = payload.get("transcript_path") or ""
+    is_codex = declared_agent == "codex" or "/.codex/sessions/" in transcript
     sid = payload.get("session_id") or ""
+    if is_codex:
+        name = os.path.basename(transcript)
+        match = re.search(r"-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$", name)
+        thread_id = str(uuid.UUID(match.group(1))) if match else (sid.split(":", 1)[-1].lower() if sid else "")
+        return ("codex:" + thread_id if thread_id else ""), "codex"
+    return sid, "claude"
+
+def handle_basic_event(event, payload, declared_agent="claude"):
+    sid, agent = session_identity(payload, declared_agent)
     cwd = payload.get("cwd") or ""
     if not sid:
         return
     if event == "end":
-        write_status(sid, cwd, "done", "end")
+        write_status(sid, cwd, "done", "end", agent)
         return
     if event == "notify":
         ntype = (payload.get("notification_type") or "").lower()
         msg = (payload.get("message") or "").lower()
         is_permission = ("permission" in ntype) if ntype else ("permission" in msg or "approve" in msg)
         if is_permission:
-            write_status(sid, cwd, "waiting", "permission-native")
+            write_status(sid, cwd, "waiting", "permission-native", agent)
         # A NON-permission notification (idle_prompt / auth / unknown) is NOT written: `done` is owned by
         # `Stop`, and forcing `done` here turned a still-running workflow/subagent chat GREEN (CC #11964 —
         # notification_type is often absent, so this can't even be classified reliably), the app's worst
@@ -198,13 +215,13 @@ def handle_basic_event(event, payload):
         # permission shim should notice an interrupted tool" signal this used to double as is restored
         # precisely by the nb_seq non-broker event counter — see WP5 — not by a bogus `done`.)
         return
-    if event in ("stop", "start"):
+    if event in ("stop", "start", "interrupt"):
         state = "done"
     elif event == "precompact":
         state = "compacting"
     else:
         state = "working"   # prompt / pre / post heartbeat
-    write_status(sid, cwd, state, event)
+    write_status(sid, cwd, state, event, agent)
 
 def summarize(tool, tool_input):
     # Bare tool name (NOT "tool: X") to match the local PermissionBroker.summarize — the ribbon shows
@@ -215,11 +232,63 @@ def summarize(tool, tool_input):
         or tool_input.get("notebook_path")
     return tool, (str(detail) if detail is not None else None)
 
-def handle_permission_request(payload):
+def handle_permission_request(payload, declared_agent="claude"):
     gc_orphans()   # opportunistic: reap pending/decision files an earlier killed shim abandoned
-    sid = payload.get("session_id") or ""
+    sid, agent = session_identity(payload, declared_agent)
     cwd = payload.get("cwd") or ""
     if not sid:   # nothing to track without a session id — hand to Claude's native prompt (emit nothing)
+        return
+    if agent == "codex":
+        tool = payload.get("tool_name") or payload.get("tool") or "?"
+        tool_input = payload.get("tool_input")
+        if not beacon_fresh():
+            write_status(sid, cwd, "waiting", "permission-native", agent)
+            return
+        # Wait only while the app's explicit visible beacon stays fresh. Otherwise let Codex show its prompt.
+        req_id = str(uuid.uuid4())
+        summary, detail = summarize(tool, tool_input)
+        req = {
+            "requestId": req_id,
+            "sessionId": sid,
+            "tool": tool,
+            "summary": summary,
+            "detail": detail,
+            "cwd": cwd,
+            "createdAt": now_iso(),
+            "toolUseId": payload.get("tool_use_id"),
+        }
+        os.makedirs(PENDING_DIR, exist_ok=True)
+        atomic_write(os.path.join(PENDING_DIR, f"{req_id}.json"), json.dumps(req).encode())
+        write_status(sid, cwd, "waiting", "permission", agent)
+        decision_file = os.path.join(PENDING_DIR, f"{req_id}.decision")
+        deadline = time.time() + POLL_TIMEOUT
+        decision = None
+        while time.time() < deadline:
+            if os.path.exists(decision_file):
+                try:
+                    with open(decision_file, "r") as f:
+                        decision = f.read().strip()
+                except Exception:
+                    decision = None
+                break
+            if not beacon_fresh():
+                break
+            time.sleep(POLL_INTERVAL)
+        for path in (os.path.join(PENDING_DIR, f"{req_id}.json"), decision_file):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if decision in ("allow", "allow-all"):
+            write_status(sid, cwd, "working", "permission-resolved", agent)
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                                       "decision": {"behavior": "allow"}}}))
+        elif decision == "deny":
+            write_status(sid, cwd, "working", "permission-resolved", agent)
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                                       "decision": {"behavior": "deny"}}}))
+        else:
+            write_status(sid, cwd, "waiting", "permission-native", agent)
         return
     tool = payload.get("tool_name") or payload.get("tool") or "?"
     tool_input = payload.get("tool_input")
@@ -335,11 +404,12 @@ def main():
     if len(sys.argv) < 3 or sys.argv[1] != "--hook":
         sys.exit(0)
     event = sys.argv[2]
+    declared_agent = "codex" if "--agent" in sys.argv[3:] and "codex" in sys.argv[3:] else "claude"
     payload = read_stdin_json()
     if event == "permission-request":
-        handle_permission_request(payload)
+        handle_permission_request(payload, declared_agent)
     else:
-        handle_basic_event(event, payload)
+        handle_basic_event(event, payload, declared_agent)
 
 if __name__ == "__main__":
     try:

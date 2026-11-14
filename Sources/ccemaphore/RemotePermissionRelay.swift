@@ -17,7 +17,8 @@ final class RemotePermissionRelay: ObservableObject {
 
     /// Poll every enabled host's pending directory once; returns the current full remote pending set
     /// (across all hosts) via `onUpdate`, tagged with `remoteHostId`.
-    func pollAll(onUpdate: @escaping ([PermissionBroker.PendingRequest]) -> Void) {
+    func pollAll(widgetVisible: Bool, onUpdate: @escaping ([PermissionBroker.PendingRequest]) -> Void) {
+        visibilityBeacon = widgetVisible
         let hosts = RemoteHosts.load().filter(\.enabled)
         guard !hosts.isEmpty else { requestHosts.removeAll(); onUpdate([]); return }
         Task { [weak self] in
@@ -26,7 +27,7 @@ final class RemotePermissionRelay: ObservableObject {
             await withTaskGroup(of: (RemoteHost, [PermissionBroker.PendingRequest]).self) { group in
                 for host in hosts {
                     group.addTask {
-                        Self.touchBeacon(host: host)
+                        Self.touchBeacon(host: host, widgetVisible: widgetVisible)
                         return (host, await Self.fetchPending(host: host))
                     }
                 }
@@ -41,6 +42,7 @@ final class RemotePermissionRelay: ObservableObject {
             // auto-allowed request still finds its host. A request only leaves the live set once its ribbon
             // is already gone, so no in-flight click can lose its route.
             self?.requestHosts = fresh
+            self?.visibilityBeacon = widgetVisible
             onUpdate(all)
         }
     }
@@ -49,15 +51,17 @@ final class RemotePermissionRelay: ObservableObject {
     /// `POLL_TIMEOUT`) before we distrust a still-present pending file — covers the round-trip time for
     /// the shim to notice its own deadline and clean up, not a second independent timeout.
     nonisolated private static let staleGraceSeconds: TimeInterval = 30
+    private var visibilityBeacon = false
 
     /// Touch a per-host liveness beacon the remote hook shim reads (see `RemoteHookShim`'s `beacon_fresh`)
-    /// to decide whether it's worth BLOCKING for a decision: a fresh beacon means this Mac is up and
-    /// actively polling the host, so a click WILL be relayed; a stale/absent one means nobody will answer,
-    /// so the shim hands straight to Claude's native prompt instead of freezing for its full timeout. The
+    /// to decide whether it's worth BLOCKING for a decision: a fresh visible beacon means this Mac is up
+    /// and actively polling the host, so a click WILL be relayed; a hidden/stale beacon means nobody will
+    /// answer, so the shim hands straight to the native prompt instead of freezing for its full timeout. The
     /// remote analogue of the local `AppPresence` readiness beacon. One tiny extra SSH exec per host per
     /// poll tick — WP7's batching (F6) can later fold it into the same round-trip as the pending glob.
-    nonisolated private static func touchBeacon(host: RemoteHost) {
-        _ = try? RemoteExec.run(host, command: "mkdir -p ~/.claude/ccemaphore && touch ~/.claude/ccemaphore/mac-beacon")
+    nonisolated private static func touchBeacon(host: RemoteHost, widgetVisible: Bool) {
+        let visible = widgetVisible ? "1" : "0"
+        _ = try? RemoteExec.run(host, command: "mkdir -p ~/.claude/ccemaphore && printf '%s' '\(visible)' > ~/.claude/ccemaphore/mac-beacon && touch ~/.claude/ccemaphore/mac-beacon")
     }
 
     nonisolated private static func fetchPending(host: RemoteHost) async -> [PermissionBroker.PendingRequest] {
@@ -97,16 +101,26 @@ final class RemotePermissionRelay: ObservableObject {
 
     /// Relay the user's decision immediately over a fresh SSH round-trip — see type doc. Retries once on
     /// failure since a click must never silently vanish while the remote hook is still blocking.
-    func decide(requestId: String, decision: PermissionBroker.Decision, onFailure: ((String) -> Void)? = nil) {
+    func decide(requestId: String, decision: PermissionBroker.Decision,
+                keepVisibleForHandoff: Bool = false,
+                onFailure: ((String) -> Void)? = nil) {
         guard let host = requestHosts[requestId] else { return }
         let path = "~/.claude/ccemaphore/pending/\(requestId).decision"
-        Task {
+        let restoreOnFailure = decision == .ask && keepVisibleForHandoff && visibilityBeacon
+        if decision == .ask && keepVisibleForHandoff { visibilityBeacon = false }
+        Task { [weak self] in
             for attempt in 0..<2 {
                 do {
                     try await Self.writeDecision(host: host, path: path, decision: decision)
+                    if decision == .ask, keepVisibleForHandoff, self?.visibilityBeacon == false {
+                        Self.touchBeacon(host: host, widgetVisible: true)
+                    }
                     return
                 } catch {
-                    if attempt == 1 { onFailure?(error.localizedDescription) }
+                    if attempt == 1 {
+                        if restoreOnFailure { self?.visibilityBeacon = true }
+                        onFailure?(error.localizedDescription)
+                    }
                 }
             }
         }

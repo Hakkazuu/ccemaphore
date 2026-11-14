@@ -46,6 +46,7 @@ struct RibbonItem: Identifiable, Equatable {
     var completedAt: Date? = nil
 
     var isDecision: Bool { if case .decision = kind { return true } else { return false } }
+    var isRemoteCodexDecision: Bool { isDecision && agent == .codex && remoteHostId != nil }
     var isCompleted: Bool { if case .completed = kind { return true } else { return false } }
 }
 
@@ -332,13 +333,22 @@ struct PermissionRibbonView: View {
     @ViewBuilder
     private func actions(_ r: RibbonItem) -> some View {
         if r.isDecision {
-            HStack(spacing: 6) {
-                ActionButton(title: L("perm.allow"), kind: .primary) { onAllow(r) }
-                ActionButton(title: L("perm.deny"), kind: .deny) { onDeny(r) }
-                ActionButton(title: L("perm.allInChat"), kind: .neutral,
-                             help: L("perm.allInChat.tooltip")) { onAll(r) }
+            if r.isRemoteCodexDecision {
+                HStack(spacing: 6) {
+                    ActionButton(title: L("perm.allow"), kind: .primary) { onAllow(r) }
+                    ActionButton(title: L("perm.deny"), kind: .deny) { onDeny(r) }
+                }
+                ActionButton(title: L("ribbon.openChat"), kind: .neutral) { onOpenChat(r) }
+                    .padding(.top, 1)
+            } else {
+                HStack(spacing: 6) {
+                    ActionButton(title: L("perm.allow"), kind: .primary) { onAllow(r) }
+                    ActionButton(title: L("perm.deny"), kind: .deny) { onDeny(r) }
+                    ActionButton(title: L("perm.allInChat"), kind: .neutral,
+                                 help: L("perm.allInChat.tooltip")) { onAll(r) }
+                }
+                .padding(.top, 1)
             }
-            .padding(.top, 1)
         } else {
             // Attention: the only action is to jump into the chat and answer there.
             ActionButton(title: L("ribbon.openChat"), kind: .primary) { onOpenChat(r) }

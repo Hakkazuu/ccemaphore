@@ -129,13 +129,15 @@ enum CodexHooksInstaller {
     /// the current set no longer uses (an older layout, imported Claude-shaped copies), are dropped;
     /// a foreign group AFTER one of those does move up, and Codex asks to approve it again — unavoidable
     /// short of leaving placeholder groups in the user's file (`logShiftedForeignHooks` names them).
-    static func merged(_ root: [String: Any], exe: String) throws -> [String: Any] {
+    static func merged(_ root: [String: Any], exe: String,
+                       permissionRequestTimeout: Int? = nil) throws -> [String: Any] {
         var hooks = try HooksInstaller.hooksObject(root, file: hooksFileName)
         let current = Dictionary(uniqueKeysWithValues: events.map { ($0.event, $0.keyword) })
         for event in Set(hooks.keys).union(current.keys) {
             var arr = try HooksInstaller.eventArray(hooks, event, file: hooksFileName)
             if let keyword = current[event] {
-                let desired = entry(event: event, keyword: keyword, exe: exe)
+                let timeout = event == "PermissionRequest" ? permissionRequestTimeout : nil
+                let desired = entry(event: event, keyword: keyword, exe: exe, timeout: timeout)
                 if let first = arr.firstIndex(where: isOurs) {
                     arr[first] = desired
                     arr = arr.enumerated().filter { $0.offset == first || !isOurs($0.element) }.map(\.element)
@@ -184,11 +186,11 @@ enum CodexHooksInstaller {
         return out
     }
 
-    static func entry(event: String, keyword: String, exe: String) -> [String: Any] {
+    static func entry(event: String, keyword: String, exe: String, timeout: Int? = nil) -> [String: Any] {
         ["hooks": [[
             "type": "command",
             "command": HooksInstaller.command(keyword: keyword, exe: exe, agent: .codex),
-            "timeout": timeout(for: event),
+            "timeout": timeout ?? self.timeout(for: event),
         ]]]
     }
 

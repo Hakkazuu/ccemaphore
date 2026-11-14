@@ -1,18 +1,15 @@
 import Foundation
 
-/// Installs/removes ccemaphore's Claude Code hooks on a REMOTE host's `~/.claude/settings.json`, over
-/// SSH, mirroring `HooksInstaller` exactly except for transport: reads/writes go through `RemoteExec`
-/// instead of `FileManager`, and the merge itself reuses `HooksInstaller`'s pure, transport-agnostic
-/// `mergeInstall`/`mergeInstallPermission`/`mergeUninstall`/`isAnyInstalled` functions — so the
-/// idempotent-merge guarantees (never touch a non-ccemaphore entry, never write on an unparseable file)
-/// hold identically on the remote side.
+/// Installs/removes ccemaphore's Claude Code and Codex hooks on a REMOTE host over SSH. The merge reuses
+/// the local installers' transport-agnostic functions, so unrelated entries are preserved and malformed
+/// settings are rejected before any file is written.
 ///
 /// The remote hook COMMAND can't be the compiled `ccemaphore` Swift binary — remote hosts may be Linux,
 /// and even on macOS shipping/trusting a copy of this app's binary on another machine is a bigger ask
-/// than necessary. Instead we deploy `RemoteHookShim.source`, a portable Python 3 script that
-/// reimplements the minimal subset of `HookHandler.run`/`PermissionBroker.runHook` needed for status +
-/// permission parity, writing the SAME `~/.claude/status/<id>.json` / `~/.claude/ccemaphore/pending/*`
-/// shapes `StatusReader`/`PermissionBroker.PendingRequest` already parse. See `RemoteHookShim.swift`.
+/// than necessary. Instead we deploy `RemoteHookShim.source`, a portable Python 3 script that writes the
+/// same `~/.claude/status/<id>.json` records parsed by `StatusReader`. Claude's permission relay also
+/// uses `~/.claude/ccemaphore/pending/*`; a visible ccemaphore widget can relay Codex approval decisions
+/// too, with Codex's native prompt as the fallback. See `RemoteHookShim.swift`.
 enum RemoteHooksInstaller {
     enum RemoteHookError: LocalizedError {
         case platformUndetected
@@ -33,14 +30,12 @@ enum RemoteHooksInstaller {
     static let remoteBaseDir = "~/.claude/ccemaphore"
     static var remoteShimPath: String { "\(remoteBaseDir)/bin/ccemaphore-hook.py" }
     static let remoteSettingsPath = "~/.claude/settings.json"
+    static let remoteCodexHooksPath = "~/.codex/hooks.json"
 
-    /// Full install: verify the host is reachable + has python3, deploy the shim, merge both the basic
-    /// and permission hook entries into the remote settings.json.
+    /// Full install: deploy the portable shim and merge Claude Code hooks.json/settings plus Codex hooks.
     static func install(_ host: RemoteHost) throws {
         guard RemoteExec.hasPython3(host) else { throw RemoteHookError.python3Missing }
         do {
-            try RemoteExec.uploadExecutable(
-                host, data: Data(RemoteHookShim.source.utf8), remotePath: remoteShimPath)
             // The hook COMMAND embedded in settings.json is quoted by `HooksInstaller.shQuote` (SHARED
             // with the local installer), which wraps the entire `exe` value in ONE pair of double quotes
             // and escapes `$` to `\$` — correct for a plain absolute path (the local case it was written
@@ -57,7 +52,16 @@ enum RemoteHooksInstaller {
             var root = stripLegacyInlineEntries(try readRemoteSettings(host))
             root = try HooksInstaller.mergeInstall(root: root, exe: exe)
             root = try HooksInstaller.mergeInstallPermission(root: root, exe: exe)
+            let codexBefore = try readRemoteCodexHooks(host)
+            let codexAfter = try CodexHooksInstaller.merged(
+                codexBefore, exe: exe, permissionRequestTimeout: Int(Tuning.permissionPollTimeout) + 30)
+            try RemoteExec.uploadExecutable(
+                host, data: Data(RemoteHookShim.source.utf8), remotePath: remoteShimPath)
             try writeRemoteSettings(host, root: root)
+            if !HooksInstaller.nsEqual(codexBefore, codexAfter) {
+                try RemoteExec.writeFile(host, path: remoteCodexHooksPath,
+                                         data: HooksInstaller.encodeSettings(codexAfter))
+            }
             Log.settings.info("installed remote hooks on \(host.label) (\(host.hostname)) exe=\(exe)")
         } catch let e as RemoteExec.SSHError {
             throw RemoteHookError.ssh(e)
@@ -71,11 +75,17 @@ enum RemoteHooksInstaller {
             let before = try readRemoteSettings(host)
             var root = stripLegacyInlineEntries(before)
             root = try HooksInstaller.mergeUninstall(root: root)
+            let codexBefore = try readRemoteCodexHooks(host)
+            let codexAfter = CodexHooksInstaller.removed(codexBefore)
             // No-write guard (compare FRESH-read vs final, not stripped-vs-final): a file with only legacy
             // inline entries still differs from `before` and MUST be rewritten, but a file with nothing of
             // ours is left byte-identical instead of being reformatted or created as `{}`.
             if !HooksInstaller.nsEqual(before, root) {
                 try writeRemoteSettings(host, root: root)
+            }
+            if !HooksInstaller.nsEqual(codexBefore, codexAfter) {
+                try RemoteExec.writeFile(host, path: remoteCodexHooksPath,
+                                         data: HooksInstaller.encodeSettings(codexAfter))
             }
             _ = try? RemoteExec.run(host, command: "rm -f \(RemoteExec.shQuote(remoteShimPath))")
             Log.settings.info("uninstalled remote hooks on \(host.label) (\(host.hostname))")
@@ -124,6 +134,11 @@ enum RemoteHooksInstaller {
     private static func readRemoteSettings(_ host: RemoteHost) throws -> [String: Any] {
         let data = try RemoteExec.readFile(host, path: remoteSettingsPath)
         return try HooksInstaller.parseSettingsStrict(data: data, path: remoteSettingsPath)
+    }
+
+    private static func readRemoteCodexHooks(_ host: RemoteHost) throws -> [String: Any] {
+        let data = try RemoteExec.readFile(host, path: remoteCodexHooksPath)
+        return try HooksInstaller.parseSettingsStrict(data: data, path: remoteCodexHooksPath)
     }
 
     private static func writeRemoteSettings(_ host: RemoteHost, root: [String: Any]) throws {

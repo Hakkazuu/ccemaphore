@@ -165,7 +165,10 @@ enum Entry {
                     let now = Date()
                     for s in result.sessions {
                         let ageSec = Int(now.timeIntervalSince(s.lastActivity))
-                        print("\(s.dot) \(s.project)  \(s.gitBranch ?? "")  age=\(ageSec)s  lastActivity=\(s.lastActivity)  id=\(s.id)")
+                        print("\(s.dot) \(s.project)  \(s.title ?? "(untitled)")  \(s.gitBranch ?? "")  age=\(ageSec)s  lastActivity=\(s.lastActivity)  id=\(s.id)")
+                        for child in s.children {
+                            print("  ↳ \(child.state.rawValue) \(child.headline)  \(child.activity?.text ?? "")  id=\(child.id)")
+                        }
                     }
                     if result.sessions.isEmpty { print("(no sessions found)") }
                     for (id, st) in result.statuses.sorted(by: { $0.key < $1.key }) {
@@ -196,7 +199,7 @@ enum Entry {
         }
         if let i = args.firstIndex(of: "--remote-install-hooks"), i + 1 < args.count {
             guard let host = RemoteHosts.resolve(args[i + 1]) else { print("no such remote host: \(args[i + 1])"); return }
-            do { try RemoteHooksInstaller.install(host); print("remote hooks installed on \(host.label)") }
+            do { print("remote hooks installed on \(host.label) (codex: \(try RemoteHooksInstaller.install(host)))") }
             catch { print("install failed: \(error.localizedDescription)") }
             return
         }

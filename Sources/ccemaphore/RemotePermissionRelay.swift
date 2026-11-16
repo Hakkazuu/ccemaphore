@@ -14,25 +14,33 @@ final class RemotePermissionRelay: ObservableObject {
     /// requestId -> host that owns it, so a decision made from the ribbon can be routed back without the
     /// caller needing to know which host a given `PendingRequest` came from ahead of time.
     private var requestHosts: [String: RemoteHost] = [:]
+    /// Hosts whose deployed shim was checked against this build this launch (`refreshShimIfOutdated`).
+    private var shimChecked: Set<String> = []
 
     /// Poll every enabled host's pending directory once; returns the current full remote pending set
     /// (across all hosts) via `onUpdate`, tagged with `remoteHostId`.
-    func pollAll(onUpdate: @escaping ([PermissionBroker.PendingRequest]) -> Void) {
+    func pollAll(widgetVisible: Bool, onUpdate: @escaping ([PermissionBroker.PendingRequest]) -> Void) {
         let hosts = RemoteHosts.load().filter(\.enabled)
         guard !hosts.isEmpty else { requestHosts.removeAll(); onUpdate([]); return }
+        let unchecked = Set(hosts.map(\.id)).subtracting(shimChecked)
         Task { [weak self] in
             var all: [PermissionBroker.PendingRequest] = []
             var fresh: [String: RemoteHost] = [:]
-            await withTaskGroup(of: (RemoteHost, [PermissionBroker.PendingRequest]).self) { group in
+            var checked: [String] = []
+            await withTaskGroup(of: (RemoteHost, [PermissionBroker.PendingRequest], Bool).self) { group in
                 for host in hosts {
                     group.addTask {
-                        Self.touchBeacon(host: host)
-                        return (host, await Self.fetchPending(host: host))
+                        // Once per launch and host, before the beacon: an older shim would ignore its
+                        // visible/hidden content and block while the widget is hidden.
+                        let shimOK = unchecked.contains(host.id) && RemoteHooksInstaller.refreshShimIfOutdated(host)
+                        Self.touchBeacon(host: host, widgetVisible: widgetVisible)
+                        return (host, await Self.fetchPending(host: host), shimOK)
                     }
                 }
-                for await (host, reqs) in group {
+                for await (host, reqs, shimOK) in group {
                     for r in reqs { fresh[r.requestId] = host }
                     all.append(contentsOf: reqs)
+                    if shimOK { checked.append(host.id) }
                 }
             }
             // REBUILD (not merge) from this pass's live set: a request that's been decided/consumed since
@@ -41,6 +49,7 @@ final class RemotePermissionRelay: ObservableObject {
             // auto-allowed request still finds its host. A request only leaves the live set once its ribbon
             // is already gone, so no in-flight click can lose its route.
             self?.requestHosts = fresh
+            self?.shimChecked.formUnion(checked)
             onUpdate(all)
         }
     }
@@ -51,13 +60,14 @@ final class RemotePermissionRelay: ObservableObject {
     nonisolated private static let staleGraceSeconds: TimeInterval = 30
 
     /// Touch a per-host liveness beacon the remote hook shim reads (see `RemoteHookShim`'s `beacon_fresh`)
-    /// to decide whether it's worth BLOCKING for a decision: a fresh beacon means this Mac is up and
-    /// actively polling the host, so a click WILL be relayed; a stale/absent one means nobody will answer,
-    /// so the shim hands straight to Claude's native prompt instead of freezing for its full timeout. The
+    /// to decide whether it's worth BLOCKING for a decision: a fresh visible beacon means this Mac is up
+    /// and actively polling the host, so a click WILL be relayed; a hidden/stale beacon means nobody will
+    /// answer, so the shim hands straight to the native prompt instead of freezing for its full timeout. The
     /// remote analogue of the local `AppPresence` readiness beacon. One tiny extra SSH exec per host per
     /// poll tick — WP7's batching (F6) can later fold it into the same round-trip as the pending glob.
-    nonisolated private static func touchBeacon(host: RemoteHost) {
-        _ = try? RemoteExec.run(host, command: "mkdir -p ~/.claude/ccemaphore && touch ~/.claude/ccemaphore/mac-beacon")
+    nonisolated private static func touchBeacon(host: RemoteHost, widgetVisible: Bool) {
+        let visible = widgetVisible ? "1" : "0"
+        _ = try? RemoteExec.run(host, command: "mkdir -p ~/.claude/ccemaphore && printf '%s' '\(visible)' > ~/.claude/ccemaphore/mac-beacon && touch ~/.claude/ccemaphore/mac-beacon")
     }
 
     nonisolated private static func fetchPending(host: RemoteHost) async -> [PermissionBroker.PendingRequest] {
@@ -97,6 +107,7 @@ final class RemotePermissionRelay: ObservableObject {
 
     /// Relay the user's decision immediately over a fresh SSH round-trip — see type doc. Retries once on
     /// failure since a click must never silently vanish while the remote hook is still blocking.
+    /// `.ask` hands a remote Codex request back to Codex's own prompt (the shim stops waiting).
     func decide(requestId: String, decision: PermissionBroker.Decision, onFailure: ((String) -> Void)? = nil) {
         guard let host = requestHosts[requestId] else { return }
         let path = "~/.claude/ccemaphore/pending/\(requestId).decision"

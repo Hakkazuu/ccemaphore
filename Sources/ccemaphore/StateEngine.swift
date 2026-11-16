@@ -67,7 +67,7 @@ final class StateEngine: ObservableObject {
     /// Outcome of an async remote hook install, in a Sendable form so it can cross the `Task.detached`
     /// boundary that runs the blocking ssh work (a bare `any Error` isn't Sendable). Carries the failure
     /// message for the row's red caption; `.installed` drives the green one.
-    enum RemoteHookInstallResult: Sendable { case installed; case failed(String) }
+    enum RemoteHookInstallResult: Sendable { case installed(RemoteHooksInstaller.CodexHooksOutcome); case failed(String) }
     /// Per-host "Install hooks" outcome, keyed by `RemoteHost.id` — transient UI feedback (V27), so the
     /// button no longer looks like it silently did nothing. Not persisted.
     @Published private(set) var remoteHooksInstallResults: [String: RemoteHookInstallResult] = [:]
@@ -361,7 +361,7 @@ final class StateEngine: ObservableObject {
     }
 
     private func pollRemotePending() {
-        remotePermissionRelay.pollAll { [weak self] reqs in
+        remotePermissionRelay.pollAll(widgetVisible: widgetVisible) { [weak self] reqs in
             guard let self else { return }
             self.remotePendingRequests = self.autoDecideRemote(reqs)
             self.recomputePending()
@@ -802,9 +802,22 @@ final class StateEngine: ObservableObject {
         // (`CodexHookOverlay`: hooks add waiting / compacting, the rollout owns working / done) —
         // `codex:<thread_id>` keys, disjoint by construction.
         let allStatus = mergedStatus
-        let codexStatus = allStatus.filter { SessionInfo.parseCodexID($0.key) != nil }
+        let codexStatus = allStatus.filter { SessionInfo.isCodexKey($0.key) }
         for s in CodexHookOverlay.apply(codexSnapshot, status: codexStatus, now: now, staleWindow: staleWindow) {
             byId[s.id] = s
+        }
+        // Remote Codex chats: the same overlay, judged by each host's own thread facts. Their keys
+        // (`remote:<host>:codex:<thread>`) are absent from the local snapshot and vice versa, so neither
+        // pass touches the other's records.
+        var remoteCodexThreads: [String: CodexThreadFacts] = [:]
+        for facts in remotePoller.codexThreads.values { remoteCodexThreads.merge(facts) { a, _ in a } }
+        if !remoteCodexThreads.isEmpty {
+            let remoteCodex = CodexSnapshot(
+                sessions: byId.values.filter { $0.agent == .codex && $0.remoteHostId != nil },
+                threads: remoteCodexThreads)
+            for s in CodexHookOverlay.apply(remoteCodex, status: codexStatus, now: now, staleWindow: staleWindow) {
+                byId[s.id] = s
+            }
         }
 
         // Local hook status folded with every reachable remote host's status. Iterating THIS merged map
@@ -812,7 +825,7 @@ final class StateEngine: ObservableObject {
         // identical merge below (suppressDone / demote / native-wait / compacting), while local sessions
         // resolve to exactly the same entries as before (remote keys are namespaced, disjoint). Codex
         // records are left out of every rule below — the overlay above has already applied them.
-        let status = allStatus.filter { SessionInfo.parseCodexID($0.key) == nil }
+        let status = allStatus.filter { !SessionInfo.isCodexKey($0.key) }
         for (id, st) in status {
             guard now.timeIntervalSince(st.updatedAt) <= staleWindow else { continue }
             // The permission broker writes `waiting` only while a request is actually pending. If its
@@ -919,8 +932,11 @@ final class StateEngine: ObservableObject {
         // the broker GCs the pending on decision/handoff; a handed-off `permission-native` wait then
         // keeps it red via the downgrade rule above. (Pairs with that rule: in-pending → red here;
         // not-in-pending + dangling `permission` → demoted to working there.)
-        for id in activePendingSessions where byId[id] != nil {
-            byId[id]?.state = .waiting
+        // A remote Codex sub-agent's live request is keyed by its own thread: it reddens the chat it
+        // shows under.
+        for pid in activePendingSessions {
+            let id = byId[pid] != nil ? pid : remoteCodexThreads[pid]?.chatId ?? pid
+            if byId[id] != nil { byId[id]?.state = .waiting }
         }
 
         // A fresh broker "native wait" (question-native / permission-native) is ALSO ground truth — the
@@ -1320,13 +1336,13 @@ final class StateEngine: ObservableObject {
     func installRemoteHooks(_ host: RemoteHost) {
         Task { [weak self] in
             let result: RemoteHookInstallResult = await Task.detached(priority: .userInitiated) {
-                do { try RemoteHooksInstaller.install(host); return .installed }
+                do { return .installed(try RemoteHooksInstaller.install(host)) }
                 catch { return .failed(error.localizedDescription) }
             }.value
             guard let self else { return }
             self.remoteHooksInstallResults[host.id] = result
             switch result {
-            case .installed: Log.settings.info("remote hooks installed (\(host.label))")
+            case .installed(let codex): Log.settings.info("remote hooks installed (\(host.label)) codex=\(codex)")
             case .failed(let msg): Log.settings.error("remote hook install failed (\(host.label)): \(msg)")
             }
         }

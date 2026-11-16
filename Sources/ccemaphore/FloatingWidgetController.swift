@@ -1068,10 +1068,13 @@ struct LightRootView: View {
         engine.decidePermission(req, decision)
     }
 
-    /// Jump to the chat (attention button + tap on an item's upper area). We DON'T resolve a live
-    /// decision here: the user answers in Cursor's own dialog, and the broker's external-resolution
-    /// detection then drops the request — so the ribbon stays truthful (red) until it's actually answered.
+    /// Jump to the chat. For a remote Codex request, release the waiting hook first so Codex can show its
+    /// native approval prompt there; other live requests remain pending for their own host dialog.
     private func openChat(_ r: RibbonItem) {
+        if r.isRemoteCodexDecision,
+           let req = engine.pendingRequests.first(where: { $0.requestId == r.id }) {
+            engine.decidePermission(req, .ask)
+        }
         DeepLinker.focus(sessionId: r.sessionId, cwd: r.cwd, host: r.host, hostBundleId: r.hostBundleId,
                          remoteHostId: r.remoteHostId, hostSessionId: r.hostSessionId)
         // A completion notice is informational; jumping to it clears it (it also auto-expires).

@@ -91,7 +91,7 @@ Only these things reach the network:
 
 - **Update checks → GitHub.** Unless you turn updates off, ccemaphore asks GitHub once a day whether
   there's a new version, and downloads it from there. GitHub sees your IP address, the app version (in
-  the User-Agent, e.g. `ccemaphore/1.4.1 Sparkle/2.10.0`) and your preferred language (the
+  the User-Agent, e.g. `ccemaphore/1.4.2 Sparkle/2.10.0`) and your preferred language (the
   `Accept-Language` header macOS adds). Each check also bumps the public download counter of the
   release's `appcast.xml` — one aggregate number anyone can see, with nothing that identifies you.
   Cookies are not stored, and no system profile is sent.
@@ -100,7 +100,12 @@ Only these things reach the network:
   off, ccemaphore never checks on its own (you can still check by hand).
 - **ccusage** (token & cost stats, only when Node or Bun is installed) runs via `bunx`/`npx`, which may
   fetch the package from the npm registry; ccusage itself may download current model pricing.
-- **SSH remote hosts** (opt-in) — ccemaphore connects only to the hosts you add, using your own `ssh`.
+- **SSH remote hosts** (opt-in) — ccemaphore connects only to the hosts you add, using your own `ssh`. When
+  you install remote hooks, it merges its entries into Claude Code settings and — only on a host that has
+  Codex — Codex's `~/.codex/hooks.json`, preserving other hooks. After an app update it refreshes its own hook
+  script on hosts where it is already installed. Codex hooks must be approved once in Codex. While the widget is visible,
+  remote Codex requests can be allowed or denied here; **Open chat** releases the hook so Codex shows its
+  own prompt.
 
 Nothing else — no chat content and no identifiers ever leave your Mac. If you run an outbound firewall
 (Little Snitch, LuLu), expect a one-time prompt for GitHub on the first update check.

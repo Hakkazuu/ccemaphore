@@ -96,7 +96,12 @@ with any change here.
 - **Usage:** `UsageProvider` (ccusage `session` / `daily [--by-agent]`; the join key is `period`).
 - **Remote hosts (SSH, opt-in):** `RemoteHosts`, `RemoteExec` (the only place that runs `ssh`),
   `RemoteTranscriptPoller`, `RemotePermissionRelay`, `RemoteHooksInstaller` + `RemoteHookShim`,
-  `RemoteHostsView` (the Settings › SSH page + the add-host form). Claude Code only — no remote Codex.
+  `RemoteHostsView` (the Settings › SSH page + the add-host form). Claude Code and Codex: remote Codex
+  rollouts are read incrementally over SSH (`RemoteExec.batchCodexFiles`, writer locks via `/proc/locks`)
+  and their hook records go through `CodexHookOverlay` like local ones; the remote shim (Python, keyed by a
+  content hash) is refreshed on hosts that have it once per launch, and Codex hooks are written only where
+  `~/.codex` exists. Remote Codex approvals block only while the widget is visible and the user (not
+  `auto_review`) reviews them; Open chat hands the request back to Codex's own prompt.
 - **Updates (Sparkle 2.10, GUI only):** `UpdateModel` (the contract — `UpdateAvailability`, `UpdateMode`,
   `UpdateInfo`, `UpdateRequirement`, `UpdateFailure`, `UpdatePhase`; no `import Sparkle`, so no view
   depends on a Sparkle type), `AppUpdater` (the owner: launch gates → `availability`, modes + persistence,

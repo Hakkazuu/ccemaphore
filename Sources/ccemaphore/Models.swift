@@ -298,6 +298,18 @@ struct SessionInfo: Identifiable, Sendable {
     /// remote status. `hostId` is a `RemoteHost.id` (UUID, no `:`), so a 2-split cleanly recovers both.
     static func remoteID(hostId: String, uuid: String) -> String { "remote:\(hostId):\(uuid)" }
 
+    /// Remote Codex ids share the remote namespace (offline status, host tagging) while retaining the
+    /// agent and thread id as distinct components so they cannot collide with local Codex or Claude ids.
+    static func remoteCodexID(hostId: String, threadId: String) -> String {
+        "remote:\(hostId):codex:\(threadId)"
+    }
+
+    /// A Codex record's key, local (`codex:<thread>`) or remote (`remote:<host>:codex:<thread>`) — the
+    /// records `CodexHookOverlay` owns and the Claude status rules leave alone.
+    static func isCodexKey(_ id: String) -> Bool {
+        parseCodexID(id) != nil || parseRemoteID(id).map { parseCodexID($0.uuid) != nil } == true
+    }
+
     static func parseRemoteID(_ id: String) -> (hostId: String, uuid: String)? {
         let parts = id.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 3, parts[0] == "remote" else { return nil }

@@ -4,8 +4,9 @@ import SwiftUI
 /// and a button that opens the add form (`RemoteHostAddForm`, the `addRemoteHost` sub-screen). This file owns
 /// only the page's own layout, not the settings chrome around it (`SettingsScreen`).
 ///
-/// Remote monitoring covers Claude Code only (remote transcripts under `~/.claude/projects`, hooks in the
-/// remote `~/.claude/settings.json`); the explainer says so, since a Codex user would otherwise expect it.
+/// Remote monitoring polls Claude transcripts and Codex rollouts. The install action also merges each
+/// agent's hooks into its remote config; Codex hooks need one-time approval in Codex and changed hook
+/// settings can prompt for approval again.
 ///
 /// A top-level view per CLAUDE.md's localization rule 4: it observes `LocalizationManager` directly.
 struct RemoteHostsView: View {
@@ -207,8 +208,13 @@ private struct RemoteHostRow: View {
                     }
                 } else if let installResult {
                     switch installResult {
-                    case .installed:
-                        Text(L("remote.hooks.installed"))
+                    case .installed(.failed(let msg)):
+                        Text(Lf("remote.hooks.codex.failed", msg))
+                            .font(.system(size: 9))
+                            .foregroundStyle(DS.redText)
+                            .lineLimit(2)
+                    case .installed(let codex):
+                        Text(L(codex == .installed ? "remote.hooks.installed.codex" : "remote.hooks.installed"))
                             .font(.system(size: 9))
                             .foregroundStyle(DS.greenText)
                     case .failed(let msg):

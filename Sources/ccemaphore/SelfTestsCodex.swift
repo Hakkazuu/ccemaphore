@@ -19,6 +19,8 @@ extension SelfTest {
             Suite(name: "Codex hooks status", body: codexHooksStatus),
             Suite(name: "Codex hook overlay", body: codexOverlay),
             Suite(name: "Hook status key", body: hookStatusKey),
+            Suite(name: "Remote Codex read", body: remoteCodexRead),
+            Suite(name: "Remote Codex keys and titles", body: remoteCodexKeys),
         ]
     }
 
@@ -49,6 +51,108 @@ extension SelfTest {
         defer { try? h.close() }
         _ = try? h.seekToEnd()
         try? h.write(contentsOf: Data(text.utf8))
+    }
+
+    // MARK: - Remote Codex
+
+    /// Run a script with the local `sh`, the way the remote host does after `base64 -d`.
+    private static func runSh(_ script: String) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", script]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The remote rollout read end to end without SSH: the real batch script run by the local `sh` on a
+    /// temp file, its output parsed, and the window folded by `RemoteTranscriptPoller.readCodex`.
+    private static func remoteCodexRead(_ t: inout Tester) {
+        let path = (t.tempDir() as NSString).appendingPathComponent("rollout-a.jsonl")
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        func size() -> UInt64 { ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.uint64Value ?? 0 }
+        func fetch(_ prev: RemoteTranscriptPoller.CodexCacheEntry?) -> (RemoteExec.CodexFile, RemoteTranscriptPoller.CodexCacheEntry)? {
+            let req = RemoteExec.CodexReadRequest(path: path, threadId: nil, resumeAt: prev?.resumeAt, needsHead: prev == nil)
+            guard let out = runSh(RemoteExec.codexBatchScript([req])),
+                  let file = RemoteExec.parseCodexBatch(out, requests: [req])?[path],
+                  let entry = RemoteTranscriptPoller.readCodex(file, prev: prev, mtime: .distantFuture) else { return nil }
+            return (file, entry)
+        }
+        let meta = line(t0, "session_meta", ["id": "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee", "cwd": "/srv/app"])
+        write([meta, event(t0 + 1, "task_started", turn: "t1")].joined(separator: "\n") + "\n{\"partial", to: path)
+        guard let (f1, e1) = fetch(nil) else { t.expect(false, "first read failed"); return }
+        t.expect(f1.head != nil, "the first read brings the head")
+        t.equal(e1.meta.cwd, "/srv/app", "meta comes from the head")
+        t.equal(e1.tail.openTurnId, "t1", "the open turn is seen")
+        t.equal(e1.resumeAt, size() - UInt64("{\"partial".utf8.count), "a half-written line is left for later")
+
+        append("\": 1}\n" + event(t0 + 3, "task_complete", turn: "t1") + "\n", to: path)
+        guard let (f2, e2) = fetch(e1) else { t.expect(false, "second read failed"); return }
+        t.expect(f2.head == nil, "a known file doesn't resend its head")
+        t.equal(f2.offset, e1.resumeAt ?? 0, "…and continues where the last read stopped")
+        t.equal(e2.tail.openTurnId, nil, "the turn end is read")
+        t.equal(e2.tail.turnsSeen, 1, "the earlier turn start carries over")
+        t.equal(e2.resumeAt, size(), "resumes at EOF")
+
+        // More than a window appended between two polls: all of it is read, so a turn start inside is seen.
+        let pad = String(repeating: "x", count: 1000)
+        let filler = (0..<600).map { _ in line(t0 + 4, "response_item", ["type": "message", "pad": pad]) }.joined(separator: "\n")
+        append(event(t0 + 4, "task_started", turn: "t2") + "\n" + filler + "\n", to: path)
+        guard let (f3, e3) = fetch(e2) else { t.expect(false, "gap read failed"); return }
+        t.equal(f3.offset, e2.resumeAt ?? 0, "growth past one window still continues")
+        t.expect(f3.data.count > RemoteExec.codexWindow, "…reading every appended byte")
+        t.equal(e3.tail.openTurnId, "t2", "a turn start far from the end is seen")
+        t.equal(e3.resumeAt, size(), "resumes at EOF")
+
+        // The file was replaced by a shorter one: the head comes back and the parse starts over.
+        write([meta, event(t0 + 9, "task_started", turn: "t9")].joined(separator: "\n") + "\n", to: path)
+        guard let (f4, e4) = fetch(e3) else { t.expect(false, "replaced read failed"); return }
+        t.expect(f4.head != nil, "a shrunk file sends its head again")
+        t.equal(e4.tail.turnsSeen, 1, "a replaced file is parsed from scratch")
+        t.equal(e4.tail.openTurnId, "t9", "…and shows its own turn")
+
+        // A forked sub-agent read from mid-file: the meta's history start skips the copied parent turn.
+        let childMeta = line(t0, "session_meta", ["id": "child", "subagent_history_start_ordinal": 3], ordinal: 0) + "\n"
+        let window = "tail-of-a-line\n" + event(t0 + 1, "task_started", turn: "parent", ordinal: 2) + "\n"
+            + line(t0 + 2, "response_item", ["type": "message"], ordinal: 3) + "\n"
+        let forked = RemoteTranscriptPoller.readCodex(
+            RemoteExec.CodexFile(size: 2_000_000, offset: 1_000_000, head: Data(childMeta.utf8), data: Data(window.utf8), catalog: nil),
+            prev: nil, mtime: .distantFuture)
+        t.equal(forked?.tail.openTurnId, nil, "a fork's copied parent turn is skipped")
+        t.equal(forked?.resumeAt, 1_000_000 + UInt64(window.utf8.count), "a mid-file window resumes at its end")
+        t.equal(RemoteExec.parseCodexBatch("C x 1 0 - -", requests: []) == nil, true, "no end marker → malformed")
+    }
+
+    private static func remoteCodexKeys(_ t: inout Tester) {
+        let remote = SessionInfo.remoteCodexID(hostId: "H", threadId: "abc")
+        t.equal(SessionInfo.isCodexKey(remote), true, "a remote Codex key is a Codex key")
+        t.equal(SessionInfo.isCodexKey("codex:abc"), true, "a local Codex key is a Codex key")
+        t.equal(SessionInfo.isCodexKey(SessionInfo.remoteID(hostId: "H", uuid: "abc")), false, "a remote Claude key isn't")
+        t.equal(SessionInfo.isCodexKey("abc"), false, "a local Claude key isn't")
+
+        // A remote record goes through the same overlay as a local one, judged by its own thread facts.
+        let now = Date()
+        var chat = SessionInfo(id: remote, project: "p", cwd: nil, gitBranch: nil, title: nil, state: .working, lastActivity: now - 30)
+        chat.agent = .codex
+        let st = StatusEntry(id: remote, state: .waiting, project: "p", cwd: nil, updatedAt: now - 10,
+                             lastEvent: "permission-native", isCompacting: false, ownerPid: nil, host: .codexApp,
+                             hostBundleId: nil, nonBrokerSeq: nil, nonBrokerEvent: nil, agent: .codex)
+        let facts = CodexThreadFacts(chatId: remote, state: .working, lastActivity: now - 30)
+        let red = CodexHookOverlay.apply(CodexSnapshot(sessions: [chat], threads: [remote: facts]), status: [remote: st], now: now)
+        t.equal(red.first?.state, .waiting, "a handed-off remote request turns its chat red")
+        var auto = facts
+        auto.approvalsGoToUser = false
+        let calm = CodexHookOverlay.apply(CodexSnapshot(sessions: [chat], threads: [remote: auto]), status: [remote: st], now: now)
+        t.equal(calm.first?.state, .working, "under auto-review the same record stays quiet")
+
+        t.equal(DeepLinker.remoteTitlePart("main.go — server [SSH: build-01] — Visual Studio Code"), "build-01",
+                "a Remote-SSH title is matched on its host part")
+        t.equal(DeepLinker.remoteTitlePart("server — Visual Studio Code"), "server — Visual Studio Code",
+                "a title without one is matched whole")
     }
 
     // MARK: - TailReader

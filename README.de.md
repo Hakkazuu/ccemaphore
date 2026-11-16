@@ -96,7 +96,7 @@ Nur Folgendes geht ins Netz:
 
 - **Update-Prüfung → GitHub.** Sofern du Updates nicht ausschaltest, fragt ccemaphore einmal täglich bei
   GitHub nach einer neuen Version und lädt sie von dort. GitHub sieht deine IP-Adresse, die App-Version
-  (im User-Agent, z. B. `ccemaphore/1.4.1 Sparkle/2.10.0`) und deine bevorzugte Sprache (den
+  (im User-Agent, z. B. `ccemaphore/1.4.2 Sparkle/2.10.0`) und deine bevorzugte Sprache (den
   `Accept-Language`-Header, den macOS hinzufügt). Jede Prüfung erhöht außerdem den öffentlichen
   Download-Zähler der `appcast.xml` des Releases – eine einzige Gesamtzahl, die jeder sehen kann und die
   nichts über dich verrät. Cookies werden nicht gespeichert, und es wird kein Systemprofil gesendet.
@@ -108,7 +108,13 @@ Nur Folgendes geht ins Netz:
   `bunx`/`npx`, die das Paket aus der npm-Registry laden können; ccusage selbst kann aktuelle
   Modellpreise abrufen.
 - **SSH-Remote-Hosts** (optional) – ccemaphore verbindet sich nur mit den Hosts, die du selbst
-  hinzufügst, über dein eigenes `ssh`.
+  hinzufügst, über dein eigenes `ssh`. Beim Installieren werden ccemaphore-Einträge zu den Claude-Code-
+  Einstellungen und – nur auf Rechnern mit Codex – zu `~/.codex/hooks.json` hinzugefügt; andere Hooks bleiben
+  erhalten. Nach einem App-Update erneuert ccemaphore sein Hook-Skript auf Rechnern, auf denen es bereits
+  installiert ist. Codex-Hooks müssen
+  einmal in Codex freigegeben werden. Solange das Widget sichtbar ist, kannst du entfernte Codex-Anfragen
+  hier erlauben oder ablehnen.
+  **Chat öffnen** gibt die Anfrage an Codex' eigenen Dialog zurück.
 
 Sonst nichts – weder Chat-Inhalte noch irgendwelche Kennungen verlassen jemals deinen Mac. Nutzt du
 eine ausgehende Firewall (Little Snitch, LuLu), rechne bei der ersten Update-Prüfung mit einer

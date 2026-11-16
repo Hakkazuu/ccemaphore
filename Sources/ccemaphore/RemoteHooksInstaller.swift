@@ -1,18 +1,16 @@
+import CryptoKit
 import Foundation
 
-/// Installs/removes ccemaphore's Claude Code hooks on a REMOTE host's `~/.claude/settings.json`, over
-/// SSH, mirroring `HooksInstaller` exactly except for transport: reads/writes go through `RemoteExec`
-/// instead of `FileManager`, and the merge itself reuses `HooksInstaller`'s pure, transport-agnostic
-/// `mergeInstall`/`mergeInstallPermission`/`mergeUninstall`/`isAnyInstalled` functions — so the
-/// idempotent-merge guarantees (never touch a non-ccemaphore entry, never write on an unparseable file)
-/// hold identically on the remote side.
+/// Installs/removes ccemaphore's Claude Code and Codex hooks on a REMOTE host over SSH. The merge reuses
+/// the local installers' transport-agnostic functions, so unrelated entries are preserved and malformed
+/// settings are rejected before any file is written.
 ///
 /// The remote hook COMMAND can't be the compiled `ccemaphore` Swift binary — remote hosts may be Linux,
 /// and even on macOS shipping/trusting a copy of this app's binary on another machine is a bigger ask
-/// than necessary. Instead we deploy `RemoteHookShim.source`, a portable Python 3 script that
-/// reimplements the minimal subset of `HookHandler.run`/`PermissionBroker.runHook` needed for status +
-/// permission parity, writing the SAME `~/.claude/status/<id>.json` / `~/.claude/ccemaphore/pending/*`
-/// shapes `StatusReader`/`PermissionBroker.PendingRequest` already parse. See `RemoteHookShim.swift`.
+/// than necessary. Instead we deploy `RemoteHookShim.source`, a portable Python 3 script that writes the
+/// same `~/.claude/status/<id>.json` records parsed by `StatusReader`. Claude's permission relay also
+/// uses `~/.claude/ccemaphore/pending/*`; a visible ccemaphore widget can relay Codex approval decisions
+/// too, with Codex's native prompt as the fallback. See `RemoteHookShim.swift`.
 enum RemoteHooksInstaller {
     enum RemoteHookError: LocalizedError {
         case platformUndetected
@@ -33,14 +31,29 @@ enum RemoteHooksInstaller {
     static let remoteBaseDir = "~/.claude/ccemaphore"
     static var remoteShimPath: String { "\(remoteBaseDir)/bin/ccemaphore-hook.py" }
     static let remoteSettingsPath = "~/.claude/settings.json"
+    static let remoteCodexHooksPath = "~/.codex/hooks.json"
 
-    /// Full install: verify the host is reachable + has python3, deploy the shim, merge both the basic
-    /// and permission hook entries into the remote settings.json.
-    static func install(_ host: RemoteHost) throws {
+    /// What a full install did with Codex's hooks on that host.
+    enum CodexHooksOutcome: Sendable, Equatable {
+        case noCodex            // no `~/.codex` there — nothing written
+        case installed
+        case failed(String)     // `~/.codex/hooks.json` unreadable / malformed — left untouched
+    }
+
+    /// The shim as deployed: the source plus a content-hash line, so `refreshShimIfOutdated` can tell an
+    /// older copy from this build's.
+    static var shimData: Data { Data((RemoteHookShim.source + "\n" + shimMarker + "\n").utf8) }
+    private static var shimMarker: String {
+        "# ccemaphore-shim: \(SHA256.hash(data: Data(RemoteHookShim.source.utf8)).map { String(format: "%02x", $0) }.joined())"
+    }
+
+    /// Full install: deploy the portable shim, merge Claude Code's hooks into `settings.json` and — only
+    /// on a host that has Codex (`~/.codex`) — Codex's into `~/.codex/hooks.json`. A Codex file that can't
+    /// be read or parsed is left alone and reported, without holding back Claude Code's hooks.
+    @discardableResult
+    static func install(_ host: RemoteHost) throws -> CodexHooksOutcome {
         guard RemoteExec.hasPython3(host) else { throw RemoteHookError.python3Missing }
         do {
-            try RemoteExec.uploadExecutable(
-                host, data: Data(RemoteHookShim.source.utf8), remotePath: remoteShimPath)
             // The hook COMMAND embedded in settings.json is quoted by `HooksInstaller.shQuote` (SHARED
             // with the local installer), which wraps the entire `exe` value in ONE pair of double quotes
             // and escapes `$` to `\$` — correct for a plain absolute path (the local case it was written
@@ -57,8 +70,11 @@ enum RemoteHooksInstaller {
             var root = stripLegacyInlineEntries(try readRemoteSettings(host))
             root = try HooksInstaller.mergeInstall(root: root, exe: exe)
             root = try HooksInstaller.mergeInstallPermission(root: root, exe: exe)
+            try RemoteExec.uploadExecutable(host, data: shimData, remotePath: remoteShimPath)
             try writeRemoteSettings(host, root: root)
-            Log.settings.info("installed remote hooks on \(host.label) (\(host.hostname)) exe=\(exe)")
+            let codex = try installCodexHooks(host, exe: exe)
+            Log.settings.info("installed remote hooks on \(host.label) (\(host.hostname)) exe=\(exe) codex=\(codex)")
+            return codex
         } catch let e as RemoteExec.SSHError {
             throw RemoteHookError.ssh(e)
         } catch let e as HooksInstaller.HookError {
@@ -76,6 +92,17 @@ enum RemoteHooksInstaller {
             // ours is left byte-identical instead of being reformatted or created as `{}`.
             if !HooksInstaller.nsEqual(before, root) {
                 try writeRemoteSettings(host, root: root)
+            }
+            // Codex's file only if it exists and parses: an unreadable one can't hold entries we could find.
+            do {
+                let codexBefore = try readRemoteCodexHooks(host)
+                let codexAfter = CodexHooksInstaller.removed(codexBefore)
+                if !HooksInstaller.nsEqual(codexBefore, codexAfter) {
+                    try RemoteExec.writeFile(host, path: remoteCodexHooksPath,
+                                             data: HooksInstaller.encodeSettings(codexAfter))
+                }
+            } catch let e as HooksInstaller.HookError {
+                Log.settings.warn("remote uninstall on \(host.label): \(remoteCodexHooksPath) left as is (\(e.localizedDescription))")
             }
             _ = try? RemoteExec.run(host, command: "rm -f \(RemoteExec.shQuote(remoteShimPath))")
             Log.settings.info("uninstalled remote hooks on \(host.label) (\(host.hostname))")
@@ -124,6 +151,50 @@ enum RemoteHooksInstaller {
     private static func readRemoteSettings(_ host: RemoteHost) throws -> [String: Any] {
         let data = try RemoteExec.readFile(host, path: remoteSettingsPath)
         return try HooksInstaller.parseSettingsStrict(data: data, path: remoteSettingsPath)
+    }
+
+    /// Merge Codex's hooks on a host that has Codex. Transport failures throw (the host is gone); a bad
+    /// `hooks.json` is reported as `.failed` and never written.
+    private static func installCodexHooks(_ host: RemoteHost, exe: String) throws -> CodexHooksOutcome {
+        let probe = try RemoteExec.run(host, command: "if [ -d \"$HOME/.codex\" ]; then echo yes; fi")
+        guard probe.trimmingCharacters(in: .whitespacesAndNewlines) == "yes" else { return .noCodex }
+        do {
+            let before = try readRemoteCodexHooks(host)
+            let after = try CodexHooksInstaller.merged(
+                before, exe: exe, permissionRequestTimeout: Int(Tuning.permissionPollTimeout) + 30)
+            if !HooksInstaller.nsEqual(before, after) {
+                try RemoteExec.writeFile(host, path: remoteCodexHooksPath, data: HooksInstaller.encodeSettings(after))
+            }
+            return .installed
+        } catch let e as HooksInstaller.HookError {
+            return .failed(e.localizedDescription)
+        }
+    }
+
+    /// Bring an already-deployed shim up to this build's version. The file is ours (overwritten on every
+    /// install), and the app and the shim must agree — e.g. on the visibility beacon — so a host keeps
+    /// working as this version expects without a manual reinstall. Never installs a shim or touches any
+    /// settings; Codex's hook trust covers the hook command, not the script's bytes, so nothing needs
+    /// re-approving. Returns false when the host couldn't be asked (retry later).
+    static func refreshShimIfOutdated(_ host: RemoteHost) -> Bool {
+        let f = RemoteExec.shQuote(remoteShimPath)
+        let cmd = "if [ ! -f \(f) ]; then echo none; elif grep -qF \(RemoteExec.shQuote(shimMarker)) \(f); then echo current; else echo old; fi"
+        guard let state = try? RemoteExec.run(host, command: cmd).trimmingCharacters(in: .whitespacesAndNewlines),
+              !state.isEmpty else { return false }
+        guard state == "old" else { return true }
+        do {
+            try RemoteExec.uploadExecutable(host, data: shimData, remotePath: remoteShimPath)
+            Log.settings.info("updated the remote hook shim on \(host.label)")
+            return true
+        } catch {
+            Log.settings.warn("remote hook shim update on \(host.label) failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private static func readRemoteCodexHooks(_ host: RemoteHost) throws -> [String: Any] {
+        let data = try RemoteExec.readFile(host, path: remoteCodexHooksPath)
+        return try HooksInstaller.parseSettingsStrict(data: data, path: remoteCodexHooksPath)
     }
 
     private static func writeRemoteSettings(_ host: RemoteHost, root: [String: Any]) throws {

@@ -4328,31 +4328,66 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Überwache Claude-Code-Sitzungen auf anderen Rechnern per SSH und beantworte ihre Berechtigungsanfragen von hier aus. Nur Claude Code – Codex auf entfernten Rechnern wird noch nicht unterstützt."
+            "value": "Überwache Claude-Code- und Codex-Sitzungen auf anderen Rechnern per SSH. Installiere Hooks, damit Codex-Freigaben und Kontextkomprimierung hier erscheinen; die Codex-Hooks müssen einmal in Codex freigegeben werden. Solange das Widget sichtbar ist, kannst du Anfragen hier erlauben oder ablehnen; „Chat öffnen“ zeigt Codex' eigenen Dialog."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Monitor Claude Code sessions on other machines over SSH, and answer their permission prompts from here. Claude Code only — Codex on remote machines isn’t supported yet."
+            "value": "Monitor Claude Code and Codex sessions on other machines over SSH. Install hooks to show Codex approval requests and context compaction here; approve the Codex hooks once in Codex. While the widget is visible, allow or deny requests here; Open chat shows Codex's own prompt."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Supervisa sesiones de Claude Code en otras máquinas por SSH y responde sus solicitudes de permiso desde aquí. Solo Claude Code: Codex en máquinas remotas aún no es compatible."
+            "value": "Supervisa sesiones de Claude Code y Codex en otras máquinas por SSH. Instala los hooks para mostrar aquí las solicitudes de aprobación y la compactación de contexto de Codex; aprueba los hooks una vez en Codex. Mientras el widget esté visible, puedes permitir o denegar aquí las solicitudes; Abrir chat muestra el diálogo propio de Codex."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Surveillez les sessions Claude Code sur d'autres machines via SSH et répondez à leurs demandes d'autorisation ici. Claude Code uniquement : Codex sur les machines distantes n’est pas encore pris en charge."
+            "value": "Surveillez les sessions Claude Code et Codex sur d'autres machines via SSH. Installez les hooks pour afficher ici les demandes d'autorisation et la compression du contexte Codex ; approuvez les hooks une fois dans Codex. Tant que le widget est visible, autorisez ou refusez les demandes ici ; Ouvrir le chat affiche le dialogue de Codex."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Следите за сессиями Claude Code на других машинах по SSH и отвечайте на их запросы разрешений прямо отсюда. Только Claude Code — Codex на удалённых машинах пока не поддерживается."
+            "value": "Следите за сессиями Claude Code и Codex на других машинах по SSH. Установите хуки, чтобы видеть здесь запросы разрешений Codex и сжатие контекста; хуки Codex нужно один раз одобрить в Codex. Пока виден виджет, запросы можно разрешать и отклонять здесь; кнопка «Перейти в чат» открывает штатный диалог Codex."
+          }
+        }
+      }
+    },
+    "remote.hooks.codex.failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude-Code-Hooks installiert. Codex-Hooks übersprungen: %@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code hooks installed. Codex hooks skipped: %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hooks de Claude Code instalados. Hooks de Codex omitidos: %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hooks Claude Code installés. Hooks Codex ignorés : %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Хуки Claude Code установлены. Хуки Codex пропущены: %@"
           }
         }
       }
@@ -4458,6 +4493,41 @@
           "stringUnit": {
             "state": "translated",
             "value": "Хуки установлены"
+          }
+        }
+      }
+    },
+    "remote.hooks.installed.codex": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hooks installiert · in Codex freigeben"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hooks installed · approve in Codex"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hooks instalados · aprobar en Codex"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hooks installés · à approuver dans Codex"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Хуки установлены · одобрите в Codex"
           }
         }
       }

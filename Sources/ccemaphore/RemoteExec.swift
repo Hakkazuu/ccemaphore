@@ -340,6 +340,181 @@ enum RemoteExec {
         return tails
     }
 
+    struct CodexCatalogRow: Sendable {
+        let title: String?
+        let parentThreadId: String?
+        let agentNickname: String?
+        let isSubagent: Bool
+    }
+
+    /// One rollout to read, as the poll cache knows it: where the last read stopped (a line boundary; nil
+    /// = seek a fresh window) and whether the session_meta head is still needed (the first read).
+    struct CodexReadRequest: Sendable {
+        let path: String
+        let threadId: String?
+        let resumeAt: UInt64?
+        let needsHead: Bool
+    }
+
+    struct CodexFile: Sendable {
+        let size: UInt64
+        /// Where `data` starts in the file.
+        let offset: UInt64
+        /// The first `codexWindow` bytes (session_meta) — sent when asked for, and whenever the file shrank
+        /// (replaced), which the reader then takes as a fresh start.
+        let head: Data?
+        /// Bytes from `offset`: everything appended since the last read (up to `codexContinueLimit`), or a
+        /// fresh window of `codexWindow`.
+        let data: Data
+        let catalog: CodexCatalogRow?
+    }
+
+    static let codexWindow = 512 * 1024
+    /// A continuation reads ALL bytes appended since the last read, like `CodexRolloutParser.readMore`:
+    /// skipping any of them could hide a turn start and paint a working chat done. Only growth beyond this
+    /// within one poll (never seen in practice) falls back to a fresh window.
+    static let codexContinueLimit = 8 * 1024 * 1024
+
+    /// One SSH round-trip for changed Codex rollouts. A rollout stays open while Codex writes and can run to
+    /// hundreds of MB, so it is never cat'ed: a known file sends only the bytes appended since `resumeAt`
+    /// (as `CodexRolloutParser.readMore` does locally), the head crosses the wire once, and a first read, a
+    /// replaced file or growth past `codexContinueLimit` gets the last `codexWindow` bytes. Base64 framing keeps
+    /// arbitrary bytes and paths unambiguous.
+    static func batchCodexFiles(_ host: RemoteHost, requests: [CodexReadRequest], timeout: TimeInterval = 20) throws -> [String: CodexFile] {
+        guard !requests.isEmpty else { return [:] }
+        let out = try runScript(host, script: codexBatchScript(requests), timeout: timeout)
+        guard let files = parseCodexBatch(out, requests: requests) else {
+            throw SSHError(message: "batchCodexFiles: malformed response", exitCode: -2)
+        }
+        return files
+    }
+
+    /// The remote half of `batchCodexFiles` (plain POSIX sh + optional python3). Split out so the self-test
+    /// runs it against local temp files.
+    static func codexBatchScript(_ requests: [CodexReadRequest]) -> String {
+        // `<b64 path>:<resumeAt or ->:<1 = send the head, else 0>` — ':' is outside the base64 alphabet.
+        let entries = requests.map {
+            "\(Data($0.path.utf8).base64EncodedString()):\($0.resumeAt.map { String($0) } ?? "-"):\($0.needsHead ? 1 : 0)"
+        }.joined(separator: " ")
+        let threadIds = Dictionary(requests.compactMap { r in r.threadId.map { (r.path, $0.lowercased()) } },
+                                   uniquingKeysWith: { a, _ in a })
+        let idList = Set(threadIds.values).filter { UUID(uuidString: $0) != nil }.map { "'\($0)'" }.joined(separator: " ")
+        let w = codexWindow, g = codexContinueLimit
+        let script = """
+        for e in \(entries); do
+          b=${e%%:*}; rest=${e#*:}; r=${rest%%:*}; hd=${rest#*:}
+          q=$(printf %s "$b" | base64 -d)
+          [ -f "$q" ] || continue
+          n=$(wc -c < "$q" | tr -d ' ')
+          if [ "$r" != "-" ] && [ "$n" -lt "$r" ]; then hd=1; r=-; fi
+          if [ "$r" != "-" ] && [ $((n - r)) -le \(g) ]; then o=$r
+          elif [ "$n" -gt \(w) ]; then o=$((n - \(w)))
+          else o=0; fi
+          h=-
+          if [ "$hd" = 1 ]; then h=$(head -c \(w) "$q" | base64 | tr -d '\\n'); [ -n "$h" ] || h=-; fi
+          t=$(tail -c +$((o + 1)) "$q" | head -c \(g) | base64 | tr -d '\\n'); [ -n "$t" ] || t=-
+          printf 'C %s %s %s %s %s\\n' "$b" "$n" "$o" "$h" "$t"
+        done
+        if [ -n '\(idList)' ] && command -v python3 >/dev/null 2>&1; then
+          python3 -c 'import base64,sqlite3,sys
+        try:
+          db=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True,timeout=0.25)
+          ids=sys.argv[2:]
+          q="SELECT id,title,name,source,thread_source FROM threads WHERE lower(id) IN ("+",".join("?" for _ in ids)+")"
+          try: rows=db.execute(q,ids)
+          except sqlite3.OperationalError:
+            q="SELECT id,title,name,source,NULL FROM threads WHERE lower(id) IN ("+",".join("?" for _ in ids)+")"
+            rows=db.execute(q,ids)
+          for ident,title,name,source,thread_source in rows:
+            values=[ident,name or "",title or "",source or "",thread_source or ""]
+            encoded=[base64.b64encode(v.encode()).decode() or "-" for v in values]
+            print("N"," ".join(encoded))
+        except Exception: pass' "$HOME/.codex/state_5.sqlite" \(idList)
+        fi
+        printf 'E\\n'
+        """
+        return script
+    }
+
+    /// nil ⇒ malformed / truncated (no `E` end marker).
+    static func parseCodexBatch(_ out: String, requests: [CodexReadRequest]) -> [String: CodexFile]? {
+        let threadIds = Dictionary(requests.compactMap { r in r.threadId.map { (r.path, $0.lowercased()) } },
+                                   uniquingKeysWith: { a, _ in a })
+        let lines = out.components(separatedBy: "\n")
+        guard lines.contains("E") else { return nil }
+        var result: [String: CodexFile] = [:]
+        var catalog: [String: CodexCatalogRow] = [:]
+        for line in lines {
+            let parts = line.split(separator: " ").map(String.init)
+            if parts.count == 6, parts[0] == "N",
+               let idData = Data(base64Encoded: parts[1]), let id = String(data: idData, encoding: .utf8),
+               let name = decodeCodexCatalogField(parts[2]),
+               let rawTitle = decodeCodexCatalogField(parts[3]),
+               let source = decodeCodexCatalogField(parts[4]),
+               let sourceType = decodeCodexCatalogField(parts[5]) {
+                let parsedTitle = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let fallbackTitle = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .split(separator: "\n", maxSplits: 1).first.map(String.init)
+                let (parentId, nickname) = CodexIndex.parseSubagentSource(source)
+                catalog[id.lowercased()] = CodexCatalogRow(
+                    title: !parsedTitle.isEmpty ? parsedTitle : fallbackTitle,
+                    parentThreadId: parentId,
+                    agentNickname: nickname,
+                    isSubagent: parentId != nil || sourceType == "subagent" || source.hasPrefix("{"))
+                continue
+            }
+            guard parts.count == 6, parts[0] == "C", let size = UInt64(parts[2]), let offset = UInt64(parts[3]),
+                  let pathData = Data(base64Encoded: parts[1]), let path = String(data: pathData, encoding: .utf8),
+                  let data = parts[5] == "-" ? Data() : Data(base64Encoded: parts[5]) else { continue }
+            let head = parts[4] == "-" ? nil : Data(base64Encoded: parts[4])
+            result[path] = CodexFile(size: size, offset: offset, head: head, data: data, catalog: nil)
+        }
+        for (path, file) in result {
+            guard let id = threadIds[path], let row = catalog[id] else { continue }
+            result[path] = CodexFile(size: file.size, offset: file.offset, head: file.head, data: file.data, catalog: row)
+        }
+        return result
+    }
+
+    private static func decodeCodexCatalogField(_ encoded: String) -> String? {
+        if encoded == "-" { return "" }
+        guard let data = Data(base64Encoded: encoded) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Which of these remote Codex threads still have their writer lock held (⇒ loaded in a live Codex
+    /// process) — the remote `CodexPaths.isWriterLockHeld`, and like it a pure query that never takes the
+    /// lock. Read from Linux's `/proc/locks`, which lists flock and POSIX locks alike, matched by inode
+    /// only: a device-number quirk (btrfs, overlayfs) then can't read "not held", and an inode collision
+    /// could only read "held" — the safe side. A thread is left out (unknown → age-based liveness) when its
+    /// lock file doesn't exist or the host has no `/proc/locks` (a macOS remote).
+    static func codexLocksHeld(_ host: RemoteHost, threadIds: [String], timeout: TimeInterval = 8) throws -> [String: Bool] {
+        let ids = threadIds.map { $0.lowercased() }.filter { UUID(uuidString: $0) != nil }
+        guard !ids.isEmpty else { return [:] }
+        let script = """
+        command -v python3 >/dev/null 2>&1 || exit 0
+        python3 -c 'import os,sys
+        try:
+          held=set()
+          for l in open("/proc/locks"):
+            for tok in l.split():
+              p=tok.split(":")
+              if len(p)==3 and p[2].isdigit(): held.add(int(p[2]))
+        except OSError: sys.exit(0)
+        d=os.path.expanduser("~/.codex/thread-writer-locks")
+        for i in sys.argv[1:]:
+          try: ino=os.stat(os.path.join(d,i+".lock")).st_ino
+          except OSError: continue
+          print("L",i,1 if ino in held else 0)' \(ids.map { "'\($0)'" }.joined(separator: " "))
+        """
+        var out: [String: Bool] = [:]
+        for line in try runScript(host, script: script, timeout: timeout).split(separator: "\n") {
+            let p = line.split(separator: " ")
+            if p.count == 3, p[0] == "L" { out[String(p[1])] = p[2] == "1" }
+        }
+        return out
+    }
+
     private static func parseBatchTails(_ out: String) -> [String: Data]? {
         let lines = out.components(separatedBy: "\n")
         guard lines.contains("E") else { return nil }

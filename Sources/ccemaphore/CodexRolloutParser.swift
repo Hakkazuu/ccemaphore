@@ -94,6 +94,11 @@ enum CodexRolloutParser {
         guard let h = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? h.close() }
         guard let data = try? h.read(upToCount: headWindow), !data.isEmpty else { return nil }
+        return readMeta(data: data)
+    }
+
+    /// Parse a rollout's first line when its bytes were read over SSH rather than from a local file.
+    static func readMeta(data: Data) -> CodexRolloutMeta? {
         guard let nl = data.firstIndex(of: UInt8(ascii: "\n")) else { return nil }   // meta line longer than the window → skip
         let line = String(decoding: data[data.startIndex..<nl], as: UTF8.self)
         guard let obj = decode(line), obj["type"] as? String == "session_meta",

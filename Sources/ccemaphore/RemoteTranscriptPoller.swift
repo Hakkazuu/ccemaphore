@@ -5,10 +5,9 @@ import Foundation
 /// `Tuning.remotePollInterval`, entirely decoupled from `StateEngine`'s local `stateTick` so one slow or
 /// unreachable host can never stall local rendering.
 ///
-/// Only top-level session transcripts (`<slug>/<uuid>.jsonl`) are polled — sub-agent/workflow fan-out
-/// folding (`SessionPath`'s `.subagent`/`.workflowRecord` cases) is a local-only refinement, out of scope
-/// here; a remote session's state is derived from its own top-level transcript tail plus (if the hook
-/// shim is installed) its `~/.claude/status` file, same graceful mode-A/mode-B layering as local.
+/// Claude transcripts and Codex rollouts are both polled over SSH. Claude sub-agent/workflow fan-out is
+/// local-only; Codex rollout parsing uses the shared classifier and remote Codex hook status is read from
+/// the same status directory as Claude's.
 @MainActor
 final class RemoteTranscriptPoller: ObservableObject {
     struct HostStatus: Equatable {
@@ -40,6 +39,22 @@ final class RemoteTranscriptPoller: ObservableObject {
     struct CacheEntry { let mtime: Date; let parsed: [LogLine] }
     private var pollCache: [String: [String: CacheEntry]] = [:]   // hostId -> (path -> entry)
 
+    /// One remote rollout as far as it has been read: the parsed tail so far and where the next read
+    /// continues (a line boundary; nil = seek a fresh window), like `CodexSessionStore`'s records.
+    struct CodexCacheEntry: Sendable {
+        let mtime: Date
+        let resumeAt: UInt64?
+        let tail: CodexTail
+        let meta: CodexRolloutMeta
+        let catalog: RemoteExec.CodexCatalogRow?
+    }
+    private var codexPollCache: [String: [String: CodexCacheEntry]] = [:]
+
+    /// Per host: every listed remote Codex thread's own facts (sub-agents included), keyed by its
+    /// `remote:<host>:codex:<thread>` id — what `CodexHookOverlay` judges that host's Codex hook records by,
+    /// exactly as it does local ones. Frozen with `lastSessions` while a host is offline.
+    private(set) var codexThreads: [String: [String: CodexThreadFacts]] = [:]
+
     /// Drop one host's cached rows from every merge buffer so a subsequent `StateEngine.render()` re-fold
     /// can't resurrect its sessions after the host was removed. Keyed by `RemoteHost.id`; only that host's
     /// namespaced (`remote:<id>:*`) entries are touched — local state is never addressed here (V19).
@@ -48,6 +63,8 @@ final class RemoteTranscriptPoller: ObservableObject {
         lastStatuses.removeValue(forKey: hostId)
         hostStatuses.removeValue(forKey: hostId)
         pollCache.removeValue(forKey: hostId)
+        codexPollCache.removeValue(forKey: hostId)
+        codexThreads.removeValue(forKey: hostId)
     }
 
     /// Poll every enabled host once. Safe to call repeatedly on a timer; each host's failure is isolated
@@ -83,6 +100,8 @@ final class RemoteTranscriptPoller: ObservableObject {
         lastStatuses = lastStatuses.filter { liveIds.contains($0.key) }
         hostStatuses = hostStatuses.filter { liveIds.contains($0.key) }
         pollCache = pollCache.filter { liveIds.contains($0.key) }
+        codexPollCache = codexPollCache.filter { liveIds.contains($0.key) }
+        codexThreads = codexThreads.filter { liveIds.contains($0.key) }
     }
 
     /// One poll of a single host — also the implementation behind `--remote-scan`. Two ssh round-trips at
@@ -149,17 +168,182 @@ final class RemoteTranscriptPoller: ObservableObject {
         }
         pollCache[host.id] = newCache   // files no longer fresh drop out of the cache (eviction)
 
+        let codexRows = await pollCodex(host: host)
+        for info in codexRows { byId[info.id] = info }
+
         // RAW mode-B status rows — NO overlay here (this path used to force-apply hook state, which
         // false-greened a Stop'd-but-still-working workflow chat, V2). StateEngine.render() folds these
         // into the SAME statusBySession merge the local hooks use (suppressDone / demote / native-wait /
         // compacting), with the staleness gate applied uniformly there. Namespaced + tagged with the host.
+        // Codex records (`remote:<host>:codex:<thread>`) go to `CodexHookOverlay` instead (see `pollCodex`).
         var statuses: [String: StatusEntry] = [:]
         for blob in meta.statuses {
             guard var entry = StatusReader.parse(data: blob.content) else { continue }
             entry.remoteHostId = host.id
             statuses[SessionInfo.remoteID(hostId: host.id, uuid: entry.id)] = entry
         }
+
         return .success((sessions: Array(byId.values), statuses: statuses))
+    }
+
+    /// Codex rollouts under the host's `~/.codex/sessions`, read like the local `CodexSessionStore`: a
+    /// changed file is continued from where the last read stopped (only the appended bytes cross the wire),
+    /// each thread is judged by the shared parser / classifier, and an open turn gone quiet is checked
+    /// against its writer lock. Codex hook records are NOT applied here — `StateEngine.render()` runs them
+    /// through `CodexHookOverlay` with the facts this publishes (`codexThreads`), the same rules as local.
+    /// A host without Codex just finds nothing.
+    private func pollCodex(host: RemoteHost) async -> [SessionInfo] {
+        let cache = codexPollCache[host.id] ?? [:]
+        // A failed listing (the host answered the metadata batch a moment ago) keeps the known files for
+        // this tick rather than dropping every Codex row.
+        let files: [(path: String, mtime: Date)] = (try? await Task.detached(priority: .utility) {
+            try RemoteExec.findFilesWithMTime(host, root: "~/.codex/sessions", namePattern: "rollout-*.jsonl",
+                                              newerThanMinutes: 3 * 24 * 60)
+        }.value) ?? cache.map { (path: $0.key, mtime: $0.value.mtime) }
+        let changed = files.filter { cache[$0.path]?.mtime != $0.mtime }
+        var fresh: [String: CodexCacheEntry] = [:]
+        if !changed.isEmpty {
+            let requests = changed.map { f in
+                RemoteExec.CodexReadRequest(path: f.path, threadId: Self.codexThreadId(f.path),
+                                            resumeAt: cache[f.path]?.resumeAt, needsHead: cache[f.path] == nil)
+            }
+            fresh = await Task.detached(priority: .utility) {
+                guard let got = try? RemoteExec.batchCodexFiles(host, requests: requests) else { return [:] }
+                var out: [String: CodexCacheEntry] = [:]
+                for f in changed {
+                    if let file = got[f.path], let e = Self.readCodex(file, prev: cache[f.path], mtime: f.mtime) {
+                        out[f.path] = e
+                    }
+                }
+                return out
+            }.value
+        }
+        // A changed file whose read missed this tick keeps its last read (old mtime → retried next tick).
+        var entries: [String: CodexCacheEntry] = [:]
+        for f in files { if let e = fresh[f.path] ?? cache[f.path] { entries[f.path] = e } }
+        codexPollCache[host.id] = entries
+
+        // Writer locks, asked only where they decide anything: an open turn quiet past `activeWindow` is
+        // either a long silent tool (lock held → working) or a Codex that died mid-turn (→ done).
+        let now = Date()
+        let quiet = entries.compactMap { path, e -> String? in
+            guard e.tail.openTurnId != nil, let last = e.tail.lastActivity,
+                  now.timeIntervalSince(last) > Tuning.activeWindow else { return nil }
+            return Self.codexThreadId(path)
+        }
+        var locks: [String: Bool] = [:]
+        if !quiet.isEmpty {
+            locks = (try? await Task.detached(priority: .utility) {
+                try RemoteExec.codexLocksHeld(host, threadIds: quiet)
+            }.value) ?? [:]
+        }
+
+        typealias Thread = (id: String, entry: CodexCacheEntry, activity: Date, state: SessionState, isImport: Bool)
+        var parents: [Thread] = []
+        var children: [String: [Thread]] = [:]
+        for (path, entry) in entries {
+            guard let threadId = Self.codexThreadId(path), let activity = entry.tail.lastActivity else { continue }
+            let isImport = entry.tail.importMarkerSeen
+            if isImport && !entry.tail.nativeTurnSeen { continue }   // a pure mirror of a Claude chat
+            let state = CodexRolloutParser.state(of: entry.tail, now: now, lockHeld: locks[threadId])
+            let thread: Thread = (threadId, entry, activity, state, isImport)
+            if entry.catalog?.isSubagent == true || entry.meta.isSubagent {
+                if let parentId = (entry.catalog?.parentThreadId ?? entry.meta.parentThreadId)?.lowercased() {
+                    children[parentId, default: []].append(thread)
+                }
+                continue
+            }
+            parents.append(thread)
+        }
+
+        var rows: [SessionInfo] = []
+        var facts: [String: CodexThreadFacts] = [:]
+        for parent in parents {
+            let entry = parent.entry
+            let id = SessionInfo.remoteCodexID(hostId: host.id, threadId: parent.id)
+            facts[id] = CodexThreadFacts(chatId: id, state: parent.state, lastActivity: entry.tail.lastActivity,
+                                         approvalsGoToUser: entry.tail.approvalsGoToUser)
+            var state = parent.state
+            var lastActivity = parent.activity
+            var childRows: [ChildAgent] = []
+            for child in children[parent.id] ?? [] {
+                let ce = child.entry
+                let childId = SessionInfo.remoteCodexID(hostId: host.id, threadId: child.id)
+                // A sub-agent that hasn't said who reviews its approvals inherits its parent's reviewer.
+                facts[childId] = CodexThreadFacts(chatId: id, state: child.state, lastActivity: ce.tail.lastActivity,
+                                                  approvalsGoToUser: ce.tail.approvalsReviewer == nil
+                                                    ? entry.tail.approvalsGoToUser : ce.tail.approvalsGoToUser)
+                guard child.state != .stale else { continue }
+                let nick = ce.catalog?.agentNickname ?? ce.meta.agentNickname
+                let title = ce.catalog?.title ?? ce.tail.lastUserMessage.map(Self.truncateCodexTitle)
+                childRows.append(ChildAgent(
+                    id: childId, name: nick ?? title ?? String(child.id.prefix(8)), kind: .codexSubagent,
+                    state: child.state, lastActivity: child.activity, title: title,
+                    purpose: CodexSessionStore.taskName(ce.meta.agentPath), who: nick, activity: ce.tail.lastAction))
+                if child.state == .working, now.timeIntervalSince(child.activity) <= Tuning.subagentGrace {
+                    state = .working
+                    lastActivity = max(lastActivity, child.activity)
+                }
+            }
+            if state == .stale { continue }
+            if state == .done, now.timeIntervalSince(lastActivity) > Tuning.activeWindow { continue }
+            let cwd = entry.tail.cwd ?? entry.meta.cwd ?? entry.tail.workspaceRoots.first
+            var info = SessionInfo(id: id, project: cwd.map { ($0 as NSString).lastPathComponent } ?? "Codex",
+                                   cwd: cwd, gitBranch: entry.meta.gitBranch,
+                                   title: entry.catalog?.title ?? entry.tail.lastUserMessage.map(Self.truncateCodexTitle),
+                                   state: state, lastActivity: lastActivity, context: entry.tail.context)
+            info.agent = .codex
+            info.origin = parent.isImport ? .claude : .codex
+            info.host = entry.meta.host ?? .codexApp
+            info.hostBundleId = info.host == .codexApp ? DeepLinker.codexAppBundleId : nil
+            info.remoteHostId = host.id
+            info.rateLimits = entry.tail.rateLimits
+            info.children = childRows.sorted { $0.lastActivity > $1.lastActivity }
+            rows.append(info)
+        }
+        codexThreads[host.id] = facts
+        return rows
+    }
+
+    nonisolated private static func codexThreadId(_ path: String) -> String? {
+        CodexPaths.threadId(fromRolloutName: (path as NSString).lastPathComponent)?.lowercased()
+    }
+
+    /// Fold one fetched window into the rollout's cache entry. Continuing the previous read keeps a turn
+    /// boundary seen long ago (`CodexRolloutParser.readMore` locally); a first read or a replaced file (the
+    /// head came back) starts over, seeded with the meta's `historyStartOrdinal` so a forked sub-agent's
+    /// copied parent history — with its unclosed `task_started` — is skipped even when the window starts
+    /// mid-file. Only complete lines are parsed: a line still being written is read next time from
+    /// `resumeAt`. nil ⇒ unusable (no readable meta on a fresh start).
+    nonisolated static func readCodex(_ file: RemoteExec.CodexFile, prev: CodexCacheEntry?, mtime: Date) -> CodexCacheEntry? {
+        let restart = prev == nil || file.head != nil
+        guard let meta = restart ? file.head.flatMap(CodexRolloutParser.readMeta(data:)) : prev?.meta else { return nil }
+        var prior = CodexTail()
+        prior.historyStartOrdinal = meta.historyStartOrdinal
+        if !restart, let prev { prior = prev.tail }
+        let data = file.data
+        var start = data.startIndex
+        if file.offset > 0, restart || file.offset != prev?.resumeAt {
+            // A window that doesn't continue the last read may start mid-line: drop that partial line.
+            guard let nl = data.firstIndex(of: UInt8(ascii: "\n")) else {
+                return CodexCacheEntry(mtime: mtime, resumeAt: nil, tail: prior, meta: meta,
+                                       catalog: file.catalog ?? prev?.catalog)
+            }
+            start = data.index(after: nl)
+        }
+        let end = data[start...].lastIndex(of: UInt8(ascii: "\n")).map { data.index(after: $0) } ?? start
+        let lines = String(decoding: data[start..<end], as: UTF8.self).split(separator: "\n").map(String.init)
+        var tail = CodexRolloutParser.parseTail(lines: lines, continuing: prior)
+        // The file's mtime is the remote kernel's clock: it bounds a stale / future timestamp in the content,
+        // matching the Claude remote reader's clock handling.
+        if let last = tail.lastActivity { tail.lastActivity = min(last, mtime) }
+        return CodexCacheEntry(mtime: mtime, resumeAt: file.offset + UInt64(end - data.startIndex), tail: tail,
+                               meta: meta, catalog: file.catalog ?? prev?.catalog)
+    }
+
+    nonisolated private static func truncateCodexTitle(_ value: String) -> String {
+        let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.count > 120 ? String(clean.prefix(119)) + "…" : clean
     }
 
     /// Legacy fallback for Phase 1 when `batchMeta`'s script can't run on a host: the original find +

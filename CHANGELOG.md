@@ -5,6 +5,25 @@ All notable changes to **ccemaphore** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-11-17
+
+### Added
+- **Codex on your SSH hosts.** Remote hosts now show Codex chats next to Claude Code ones — with titles,
+  sub-agents, and context compaction — and **Open chat** takes you to the host's VS Code window.
+- **Answer remote Codex approvals from the light.** With the remote hooks installed (and approved once in
+  Codex), a Codex request on a host shows **Allow** / **Deny** at the light while it's visible; **Open
+  chat** hands it back to Codex's own prompt. When the light is hidden, or a guardian reviews approvals
+  for that chat (`auto_review`), Codex is never kept waiting — it asks as usual.
+
+### Changed
+- **Install hooks** writes Codex's hooks only on hosts that have Codex. If that host's
+  `~/.codex/hooks.json` can't be read, Claude Code's hooks are still installed and Settings says why
+  Codex's weren't.
+- The hook script on your hosts updates itself after an app update — no need to reinstall hooks to get
+  fixes. A request on a host now waits for a click at the light only while the light is visible, the way
+  local requests already did.
+- Without Accessibility access, **Open chat** for a remote chat opens its folder in VS Code again.
+
 ## [1.4.1] - 2026-11-10
 
 ### Fixed

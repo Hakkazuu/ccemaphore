@@ -97,7 +97,7 @@ Solo esto sale a la red:
 
 - **Comprobación de actualizaciones → GitHub.** Salvo que desactives las actualizaciones, ccemaphore
   pregunta a GitHub una vez al día si hay una versión nueva y la descarga de allí. GitHub ve tu dirección
-  IP, la versión de la app (en el User-Agent, p. ej. `ccemaphore/1.4.1 Sparkle/2.10.0`) y tu idioma
+  IP, la versión de la app (en el User-Agent, p. ej. `ccemaphore/1.4.2 Sparkle/2.10.0`) y tu idioma
   preferido (la cabecera `Accept-Language` que añade macOS). Cada comprobación incrementa además el
   contador público de descargas del `appcast.xml` de la versión: un único número agregado que cualquiera
   puede ver y que no te identifica. No se guardan cookies ni se envía ningún perfil del sistema.
@@ -109,7 +109,11 @@ Solo esto sale a la red:
   pueden descargar el paquete del registro de npm; el propio ccusage puede descargar los precios actuales
   de los modelos.
 - **Hosts remotos por SSH** (opcional): ccemaphore solo se conecta a los hosts que tú añadas, con tu propio
-  `ssh`.
+  `ssh`. Al instalar los hooks, añade sus entradas a la configuración de Claude Code y, solo en
+  equipos con Codex, a `~/.codex/hooks.json`, conservando los demás hooks. Tras actualizar la app, renueva su
+  script de hooks en los equipos donde ya está instalado. Debes aprobar los hooks de Codex una vez en Codex.
+  Mientras el widget esté visible, puedes permitir o denegar aquí las solicitudes remotas de Codex.
+  **Abrir chat** devuelve la solicitud al diálogo propio de Codex.
 
 Nada más: ni el contenido de los chats ni ningún identificador salen nunca de tu Mac. Si usas un
 cortafuegos de salida (Little Snitch, LuLu), espera un único aviso sobre GitHub en la primera

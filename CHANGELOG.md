@@ -5,6 +5,18 @@ All notable changes to **ccemaphore** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.4] - 2026-11-17
+
+### Fixed
+- **Remote Codex chats show their titles.** Newer Codex versions name a rollout file
+  `<thread>_<rollout>.jsonl`; such chats were looked up by the wrong id, so they had no title and their
+  hook records (waiting for approval, compaction) never matched. A chat with several rollout files now
+  shows once, from its newest file.
+- **Lighter launch.** The full scan of `~/.claude/projects` (at launch, after a dropped file-system event
+  batch, and on Refresh) now reads only transcripts written in the last 30 minutes, plus the parent chat
+  of any recent sub-agent. With a long history it used to read every transcript: about 20 seconds and a
+  memory peak above 1 GB, which macOS kept assigned to the app long after.
+
 ## [1.4.3] - 2026-11-17
 
 ### Fixed

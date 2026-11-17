@@ -5,7 +5,8 @@ import Foundation
 /// `codex exec` — they all read and write the same `CODEX_HOME` (default `~/.codex`). Verified on
 /// codex-cli 0.162 (see memory/codex-integration-research):
 ///
-///   sessions/YYYY/MM/DD/rollout-<ISO ts>-<uuid v7>.jsonl   the thread transcript ("rollout")
+///   sessions/YYYY/MM/DD/rollout-<ISO ts>-<thread_id>[_<rollout_id>].jsonl
+///                                                            the thread transcript ("rollout")
 ///   archived_sessions/rollout-*.jsonl                       archived threads (flat; ignored)
 ///   state_5.sqlite                                          thread catalog (`threads`, `projects`, …)
 ///   thread-writer-locks/<thread_id>.lock                    flock held while a process has the thread loaded
@@ -65,14 +66,16 @@ enum CodexPaths {
         return .thread(id: id)
     }
 
-    /// `rollout-2026-10-08T19-29-37-01a11c22-5ef9-7282-a2d4-762ada2e6b8c.jsonl` → the trailing uuid.
-    /// The timestamp prefix also contains dashes, so take the LAST 36 characters before `.jsonl` and
-    /// validate them as a uuid rather than splitting on `-`.
+    /// `rollout-2026-10-08T19-29-37-01a11c22-5ef9-7282-a2d4-762ada2e6b8c.jsonl` → that uuid. Newer Codex
+    /// names may end `<thread_id>_<rollout_id>`: the catalog and `session_meta.id` know the thread by the
+    /// first uuid, the second only names the rollout. The timestamp prefix also contains dashes, so take
+    /// the LAST 36 characters of the part before `_` and validate them as a uuid rather than split on `-`.
     static func threadId(fromRolloutName name: String) -> String? {
         guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl") else { return nil }
         let stem = name.dropLast(".jsonl".count)
-        guard stem.count > 36 else { return nil }
-        let id = String(stem.suffix(36))
+        let threadPart = stem.split(separator: "_", maxSplits: 1, omittingEmptySubsequences: false).first ?? stem[...]
+        guard threadPart.count > 36 else { return nil }
+        let id = String(threadPart.suffix(36))
         return UUID(uuidString: id) != nil ? id.lowercased() : nil
     }
 

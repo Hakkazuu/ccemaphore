@@ -9,7 +9,29 @@ extension SelfTest {
             Suite(name: "Agent actions (Codex)", body: codexActions),
             Suite(name: "Sub-agent rows", body: childRows),
             Suite(name: "Usage schedule", body: usageSchedule),
+            Suite(name: "Full scan reads recent transcripts", body: recentTranscripts),
         ]
+    }
+
+    /// A full scan skips transcripts past `staleWindow` but keeps a live sub-agent's quiet parent.
+    private static func recentTranscripts(_ t: inout Tester) {
+        let root = t.tempDir(), fm = FileManager.default, now = Date()
+        let old = "11111111-1111-4111-8111-111111111111", fresh = "22222222-2222-4222-8222-222222222222"
+        let parent = "33333333-3333-4333-8333-333333333333"
+        func file(_ rel: String, age: TimeInterval) -> String {
+            let path = "\(root)/\(rel)"
+            try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            fm.createFile(atPath: path, contents: Data("{}\n".utf8))
+            try? fm.setAttributes([.modificationDate: now.addingTimeInterval(-age)], ofItemAtPath: path)
+            return path
+        }
+        let oldPath = file("-p/\(old).jsonl", age: 86_400)
+        let freshPath = file("-p/\(fresh).jsonl", age: 60)
+        let parentPath = file("-p/\(parent).jsonl", age: 86_400)
+        let agentPath = file("-p/\(parent)/subagents/agent-a1.jsonl", age: 60)
+        let got = Set(SessionPath.enumerateTranscripts(root: root, modifiedWithin: 1800, now: now))
+        t.equal(got, [freshPath, agentPath, parentPath], "recent files + a recent sub-agent's parent")
+        t.expect(!got.contains(oldPath), "an old chat is skipped")
     }
 
     /// When ccusage runs (`UsageSchedule`) and what a failed run's log line keeps (`stderrTail`).

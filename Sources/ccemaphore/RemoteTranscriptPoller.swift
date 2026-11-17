@@ -241,8 +241,11 @@ final class RemoteTranscriptPoller: ObservableObject {
         typealias Thread = (id: String, entry: CodexCacheEntry, activity: Date, state: SessionState, isImport: Bool)
         var parents: [Thread] = []
         var children: [String: [Thread]] = [:]
-        for (path, entry) in entries {
-            guard let threadId = Self.codexThreadId(path), let activity = entry.tail.lastActivity else { continue }
+        // One thread may own several rollouts (`<thread_id>_<rollout_id>.jsonl`): the newest one speaks for it.
+        var seen: Set<String> = []
+        for (path, entry) in entries.sorted(by: { ($0.value.tail.lastActivity ?? .distantPast) > ($1.value.tail.lastActivity ?? .distantPast) }) {
+            guard let threadId = Self.codexThreadId(path), let activity = entry.tail.lastActivity,
+                  seen.insert(threadId).inserted else { continue }
             let isImport = entry.tail.importMarkerSeen
             if isImport && !entry.tail.nativeTurnSeen { continue }   // a pure mirror of a Claude chat
             let state = CodexRolloutParser.state(of: entry.tail, now: now, lockHeld: locks[threadId])

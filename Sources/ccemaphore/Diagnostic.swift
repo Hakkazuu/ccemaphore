@@ -58,13 +58,13 @@ enum Diagnostic {
             for k in sampleKeys { print("  \(k) = \(L(k))") }
             print("  count.working(3) = \(Lf("count.working", 3))")
             print("  settings.registry.live(4) = \(Lf("settings.registry.live", 4))   back.a11y = \(Lf("settings.back.a11y", L("settings.tab.agents")))")
-            print("  update.available.title(1.4.3) = \(Lf("update.available.title", "1.4.3"))   menubar.update.restart(1.4.0) = \(Lf("menubar.update.restart", "1.4.0"))")
+            print("  update.available.title(1.4.4) = \(Lf("update.available.title", "1.4.4"))   menubar.update.restart(1.4.0) = \(Lf("menubar.update.restart", "1.4.0"))")
             print("  settings.updates.lastCheck(-2h) = \(Lf("settings.updates.lastCheck", Fmt.relative(Date().addingTimeInterval(-2 * 3600))))"
                   + "   (now) = \(Lf("settings.updates.lastCheck", Fmt.relative(Date())))")
             print("  update.incompatible.newerMacOS(1.4.0, 14.0) = \(Lf("update.incompatible.newerMacOS", "1.4.0", "14.0"))"
                   + "   appleSilicon(1.4.0) = \(Lf("update.incompatible.appleSilicon", "1.4.0"))")
             print("  update.incompatible.body(1.3.0) = \(Lf("update.incompatible.body", "1.3.0"))"
-                  + "   menubar.update.install(1.4.3) = \(Lf("menubar.update.install", "1.4.3"))")
+                  + "   menubar.update.install(1.4.4) = \(Lf("menubar.update.install", "1.4.4"))")
             for n in [1, 2, 5, 21, 22] {
                 print("  chats(\(n)) = \(Lcount("noun.chats", n))   days(\(n)) = \(Lcount("noun.days", n))   retention=\(Lcount("noun.daysShort", n))   subagents=\(Lcount("noun.subagents", n))")
             }

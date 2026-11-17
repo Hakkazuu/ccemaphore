@@ -74,13 +74,25 @@ enum SessionPath {
         slug.split(separator: "-").last.map(String.init) ?? slug
     }
 
-    /// All `*.jsonl` paths under the projects root (for the initial scan at launch).
-    static func enumerateTranscripts(root: String = projectsRoot) -> [String] {
+    /// The `*.jsonl` paths under the projects root written within `window` (a full scan: launch, a dropped
+    /// FSEvents batch, Refresh). Older ones can't be live — `SessionStore` drops a record past `staleWindow`
+    /// (content timestamps never exceed the file's mtime) — and reading every tail of a long history cost
+    /// ~20 s and a 1.4 GB peak. A recent sub-agent's parent comes along even when quiet: it names the chat.
+    static func enumerateTranscripts(root: String = projectsRoot, modifiedWithin window: TimeInterval = Tuning.staleWindow,
+                                     now: Date = Date()) -> [String] {
         guard let en = FileManager.default.enumerator(atPath: root) else { return [] }
-        var out: [String] = []
+        let cutoff = now.addingTimeInterval(-window)
+        var out: Set<String> = []
         for case let rel as String in en where rel.hasSuffix(".jsonl") {
-            out.append((root as NSString).appendingPathComponent(rel))
+            let path = (root as NSString).appendingPathComponent(rel)
+            guard let mtime = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date,
+                  mtime >= cutoff else { continue }
+            out.insert(path)
+            if case .subagent(let parentId, let slug, _) = classify(path, root: root) {
+                let parent = "\(root)/\(slug)/\(parentId).jsonl"
+                if FileManager.default.fileExists(atPath: parent) { out.insert(parent) }
+            }
         }
-        return out
+        return Array(out)
     }
 }

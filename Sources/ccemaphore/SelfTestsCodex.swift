@@ -153,6 +153,14 @@ extension SelfTest {
                 "a Remote-SSH title is matched on its host part")
         t.equal(DeepLinker.remoteTitlePart("server — Visual Studio Code"), "server — Visual Studio Code",
                 "a title without one is matched whole")
+
+        let thread = "01a11c22-5ef9-7282-a2d4-762ada2e6b8c", rollout = "01a1e48c-d272-7452-b6ef-cba49fa543b6"
+        t.equal(CodexPaths.threadId(fromRolloutName: "rollout-2026-10-08T19-29-37-\(thread).jsonl"), thread,
+                "a plain rollout name yields its thread id")
+        t.equal(CodexPaths.threadId(fromRolloutName: "rollout-2026-10-08T19-29-37-\(thread)_\(rollout).jsonl"), thread,
+                "a <thread>_<rollout> name yields the thread id, not the rollout's")
+        t.equal(CodexPaths.threadId(fromRolloutName: "rollout-2026-10-08T19-29-37-nope.jsonl"), nil,
+                "a name without a uuid is ignored")
     }
 
     // MARK: - TailReader

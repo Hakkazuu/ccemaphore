@@ -18,14 +18,14 @@ the scripts in [`Scripts/release/`](../Scripts/release/), which can also be run 
 ## Cutting a release
 
 1. **Bump the version in Xcode.** Set both build settings:
-   - `MARKETING_VERSION` (the human version, e.g. `1.4.3`);
+   - `MARKETING_VERSION` (the human version, e.g. `1.4.4`);
    - `CURRENT_PROJECT_VERSION` (the build number, a plain integer).
 
    Edit them in *Project ▸ ccemaphore ▸ Build Settings*, or as *Version* / *Build* on the target's
    *General* tab. `Resources/Info.plist` reads both settings, so never type a version into it. The build
    number is what Sparkle compares. It must be greater than every build ever published, prereleases
    included. CI enforces this.
-2. **Add the release notes** to `CHANGELOG.md` as a `## [1.4.3] - YYYY-MM-DD` section, in the existing
+2. **Add the release notes** to `CHANGELOG.md` as a `## [1.4.4] - YYYY-MM-DD` section, in the existing
    Keep a Changelog format. That section, in English Markdown, is shown in the app's update row and
    used as the body of the GitHub release.
 3. **Commit and push `main`.** If the packages changed, include
@@ -33,8 +33,8 @@ the scripts in [`Scripts/release/`](../Scripts/release/), which can also be run 
    point at a commit that is already on `main`, so push before you tag.
 4. **Tag and push:**
    ```sh
-   git tag v1.4.3
-   git push origin v1.4.3
+   git tag v1.4.4
+   git push origin v1.4.4
    ```
 5. **Approve the run.** The `preflight` job runs first and needs no secrets. When it passes, the run
    summary shows the version, the build number and the release notes, and the notes are also attached
@@ -48,10 +48,10 @@ the scripts in [`Scripts/release/`](../Scripts/release/), which can also be run 
 
 | Tag | Example | What happens |
 | --- | --- | --- |
-| `vX.Y.Z` | `v1.4.3` | Stable. Becomes the "latest" release, and its `appcast.xml` is served to every installed copy. Must be tagged on a commit that is on `main`. |
-| `vX.Y.Z-<suffix>` | `v1.4.3-rc.1` | Prerelease. Published with its own `appcast.xml`, never marked "latest", so no installed copy sees it unless you point one at it (see [Testing an update](#testing-an-update-end-to-end)). |
-| any other `v…` tag | `v1.3`, `v1.4.3.1`, `v1.4.3+5` | Rejected by `preflight`. |
-| no leading `v` | `1.4.3` | Starts no run at all: the workflow only reacts to tags that start with `v`. |
+| `vX.Y.Z` | `v1.4.4` | Stable. Becomes the "latest" release, and its `appcast.xml` is served to every installed copy. Must be tagged on a commit that is on `main`. |
+| `vX.Y.Z-<suffix>` | `v1.4.4-rc.1` | Prerelease. Published with its own `appcast.xml`, never marked "latest", so no installed copy sees it unless you point one at it (see [Testing an update](#testing-an-update-end-to-end)). |
+| any other `v…` tag | `v1.3`, `v1.4.4.1`, `v1.4.4+5` | Rejected by `preflight`. |
+| no leading `v` | `1.4.4` | Starts no run at all: the workflow only reacts to tags that start with `v`. |
 
 For both kinds, `MARKETING_VERSION` must equal `X.Y.Z`. A prerelease uses its own `## [X.Y.Z-suffix]`
 CHANGELOG section if one exists, otherwise the `## [X.Y.Z]` section.
@@ -265,7 +265,7 @@ CI reads `APPLE_TEAM_ID`, and the app accepts any Developer ID signature.
       Certificate From a Certificate Authority…*, and save the CSR to disk. This also creates the private
       key in that Mac's login keychain, so do the steps below on the same Mac.
    2. In *developer.apple.com ▸ Certificates, Identifiers & Profiles ▸ Certificates ▸ +*, choose
-      **Developer ID Application**, then **G2 Sub-CA (Xcode 11.4.3 or later)**, and upload the CSR.
+      **Developer ID Application**, then **G2 Sub-CA (Xcode 11.4.4 or later)**, and upload the CSR.
    3. Download the certificate and double-click it to install it in the keychain where the CSR was made.
       Select it in *Keychain Access* and expand *Issuer Name*: *Organizational Unit* must read **G2**.
       *Apple Certification Authority* there means the previous Sub-CA.
@@ -501,7 +501,7 @@ signing identity, and check the checkout: nothing uncommitted may go into the bu
 guard prints STOP. `--require-on-main` applies to stable tags only.
 
 ```sh
-V=1.4.3 B=8 TAG=v1.4.3 TEAM=<TEAMID> ID="Developer ID Application: <Company> (<TEAMID>)"
+V=1.4.4 B=8 TAG=v1.4.4 TEAM=<TEAMID> ID="Developer ID Application: <Company> (<TEAMID>)"
 git fetch origin
 [ -z "$(git status --porcelain)" ] || echo "STOP: uncommitted changes would go into the build"
 Scripts/release/check-version.sh --tag "$TAG" --require-on-main

@@ -5,6 +5,13 @@ All notable changes to **ccemaphore** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-11-17
+
+### Fixed
+- **Open chat** for a remote chat without Accessibility access brings the running VS Code forward again
+  instead of opening a new window each time (a regression in 1.4.2). With Accessibility granted it still
+  picks the host's own window.
+
 ## [1.4.2] - 2026-11-17
 
 ### Added

@@ -159,8 +159,18 @@ enum DeepLinker {
         // Neither the `code` CLI's `--folder-uri` NOR the `vscode://vscode-remote/...` URI were found to reuse an existing window
         // for an already-open remote folder (both were confirmed live to always spawn a fresh one), so
         // this AX-based match is the only path that avoids window-duplication for a remote jump.
-        if let bundleId = vscodeBundleId, FocusResolver.accessibilityGranted {
+        vscode: if let bundleId = vscodeBundleId {
             let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+            guard FocusResolver.accessibilityGranted else {
+                // Window titles can't be read without Accessibility: reuse the running editor rather than
+                // open a duplicate Remote-SSH window. Granting Accessibility picks the exact host window.
+                if let app = apps.first {
+                    app.activate(options: [.activateIgnoringOtherApps])
+                    Log.focus.info("jump sid=\(sid) host=remote(\(host.label)) via=activate-existing-no-ax")
+                    return
+                }
+                break vscode
+            }
             let needles = [host.hostname, host.label, authority, host.sshUser, remoteHostname]
                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
@@ -190,8 +200,8 @@ enum DeepLinker {
             }
         }
 
-        // Fall back to the `code` CLI: it opens the chat's remote folder — in a new window, since without a
-        // window match (or without Accessibility to look for one) the right existing window is unknown.
+        // Fall back to the `code` CLI only when no running editor can be reused: it opens the chat's remote
+        // folder, in a new window.
         if let bin = vscodeBin {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: bin)
